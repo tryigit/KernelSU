@@ -1,4 +1,4 @@
-name: PR3650 rescan format
+name: PR3650 rescan init-mark patch
 
 on:
   push:
@@ -9,25 +9,51 @@ permissions:
   contents: write
 
 jobs:
-  format:
-    if: ${{ !contains(github.event.head_commit.message, '[selinux-format-done]') }}
+  patch:
+    if: ${{ !contains(github.event.head_commit.message, '[init-mark-patched]') }}
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - name: Format transactional SELinux hide fix
+      - name: Restore selective init-child unmarking
         shell: bash
         run: |
-          clang-format -i kernel/feature/selinux_hide.c
+          python3 - <<'PY'
+          from pathlib import Path
+
+          path = Path('kernel/hook/syscall_event_bridge.c')
+          text = path.read_text()
+          include_anchor = '#include "klog.h" // IWYU pragma: keep\n'
+          if '#include "hook/tp_marker.h"\n' not in text:
+              text = text.replace(include_anchor, include_anchor + '#include "hook/tp_marker.h"\n', 1)
+
+          old = '''    if (unlikely(strcmp(path, KSUD_PATH) == 0)) {
+              pr_info("hook_manager: escape to root for init executing ksud: %d\\n", current->pid);
+              escape_to_root_for_init();
+          }
+          '''
+          old = '\n'.join(line[10:] if line.startswith('          ') else line for line in old.splitlines()) + '\n'
+          new = '''    if (unlikely(strcmp(path, KSUD_PATH) == 0)) {
+              pr_info("hook_manager: escape to root for init executing ksud: %d\\n", current->pid);
+              escape_to_root_for_init();
+          } else if (likely(strstr(path, "/app_process") == NULL && strstr(path, "/adbd") == NULL &&
+                            strstr(path, "/stub_zygote") == NULL)) {
+              pr_debug("hook_manager: unmark %d exec %s\\n", current->pid, path);
+              ksu_clear_task_tracepoint_flag_if_needed(current);
+          }
+          '''
+          new = '\n'.join(line[10:] if line.startswith('          ') else line for line in new.splitlines()) + '\n'
+          if old not in text:
+              raise SystemExit('init mark tracker anchor not found')
+          path.write_text(text.replace(old, new, 1))
+          PY
+          clang-format -i kernel/hook/syscall_event_bridge.c
           git diff --check
-          git diff -- kernel/feature/selinux_hide.c
-      - name: Commit formatting
+          git diff -- kernel/hook/syscall_event_bridge.c
+      - name: Commit patch
         shell: bash
         run: |
-          if git diff --quiet -- kernel/feature/selinux_hide.c; then
-            exit 0
-          fi
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add kernel/feature/selinux_hide.c
-          git commit -m "style: format SELinux rollback fix [selinux-format-done]"
+          git add kernel/hook/syscall_event_bridge.c
+          git commit -m "fix: restore selective init child unmarking [init-mark-patched]"
           git push
