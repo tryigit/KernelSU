@@ -30,20 +30,24 @@ bool ksu_current_task_needs_syscall_hook(void)
 #endif
 }
 
-static void handle_process_mark(bool mark_all, bool clear_unneeded)
+static void handle_process_mark(bool clear_unneeded)
 {
     struct task_struct *p, *t;
 
     read_lock(&tasklist_lock);
+    /*
+     * An external sys_enter consumer sets syscall_tracepoint_shared before
+     * taking tasklist_lock for the global mark pass. Re-check after acquiring
+     * the read side so a stale caller decision can never clear a mark after
+     * that global pass has completed.
+     */
+    if (clear_unneeded && !ksu_syscall_tracepoint_allows_selective_marks())
+        clear_unneeded = false;
+
     for_each_process_thread (p, t) {
         const struct cred *cred;
         bool needs_hook = false;
         uid_t uid;
-
-        if (mark_all) {
-            ksu_set_task_tracepoint_flag(t);
-            continue;
-        }
 
         if (t->pid == 1 || t->mm) {
             uid = task_uid(t).val;
@@ -60,19 +64,37 @@ static void handle_process_mark(bool mark_all, bool clear_unneeded)
     read_unlock(&tasklist_lock);
 }
 
-static void handle_process_unmark_all(void)
+static bool handle_process_unmark_all(void)
 {
     struct task_struct *p, *t;
+    bool cleared = false;
 
     read_lock(&tasklist_lock);
+    if (!ksu_syscall_tracepoint_allows_selective_marks())
+        goto out;
+
     for_each_process_thread (p, t)
         ksu_clear_task_tracepoint_flag(t);
+    cleared = true;
+out:
     read_unlock(&tasklist_lock);
+    return cleared;
 }
 
 void ksu_mark_all_process(void)
 {
-    handle_process_mark(true, false);
+    struct task_struct *p, *t;
+
+    /*
+     * Serialize the global set pass against every selective clear path. The
+     * tracepoint mutation observer flips the shared-state bit before entering
+     * here, so a reader that started earlier finishes first and this pass wins;
+     * a reader that starts later observes shared state and refuses to clear.
+     */
+    write_lock(&tasklist_lock);
+    for_each_process_thread (p, t)
+        ksu_set_task_tracepoint_flag(t);
+    write_unlock(&tasklist_lock);
 }
 
 void ksu_unmark_all_process(void)
@@ -82,12 +104,13 @@ void ksu_unmark_all_process(void)
         return;
     }
 
-    handle_process_unmark_all();
+    if (!handle_process_unmark_all())
+        pr_warn("tp_marker: shared syscall tracepoint appeared while unmarking\n");
 }
 
 void ksu_mark_running_process_selective(void)
 {
-    handle_process_mark(false, true);
+    handle_process_mark(true);
 }
 
 void ksu_mark_running_process(void)
@@ -97,13 +120,15 @@ void ksu_mark_running_process(void)
      * Only clear stale marks when the hook manager has proved KernelSU is the
      * sole consumer; otherwise add marks for newly relevant tasks only.
      */
-    handle_process_mark(false, ksu_syscall_tracepoint_allows_selective_marks());
+    handle_process_mark(ksu_syscall_tracepoint_allows_selective_marks());
 }
 
 void ksu_clear_task_tracepoint_flag_if_needed(struct task_struct *t)
 {
+    read_lock(&tasklist_lock);
     if (ksu_syscall_tracepoint_allows_selective_marks())
         ksu_clear_task_tracepoint_flag(t);
+    read_unlock(&tasklist_lock);
 }
 
 int ksu_get_task_mark(pid_t pid)
@@ -142,12 +167,20 @@ int ksu_set_task_mark(pid_t pid, bool mark)
     if (task) {
         get_task_struct(task);
         rcu_read_unlock();
-        if (mark)
+        if (mark) {
             ksu_set_task_tracepoint_flag(task);
-        else
-            ksu_clear_task_tracepoint_flag(task);
+            ret = 0;
+        } else {
+            read_lock(&tasklist_lock);
+            if (!ksu_syscall_tracepoint_allows_selective_marks()) {
+                ret = -EBUSY;
+            } else {
+                ksu_clear_task_tracepoint_flag(task);
+                ret = 0;
+            }
+            read_unlock(&tasklist_lock);
+        }
         put_task_struct(task);
-        ret = 0;
     } else {
         rcu_read_unlock();
     }
