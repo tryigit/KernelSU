@@ -1,0 +1,197 @@
+name: PR3650 LSM ownership patch
+
+on:
+  push:
+    branches:
+      - test/pr3650-rescan-lsm-patchwork
+
+permissions:
+  contents: write
+
+jobs:
+  patch:
+    if: ${{ !contains(github.event.head_commit.message, '[lsm-ownership-patched]') }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Apply LSM ownership-safe unhook fix
+        shell: bash
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+
+          cpath = Path('kernel/hook/lsm_hook.c')
+          text = cpath.read_text()
+          start = text.index('void ksu_lsm_unhook(struct ksu_lsm_hook *hook)\n{')
+          end = text.index('\nint ksu_register_lsm_hook(struct ksu_lsm_hook *hook)', start)
+          replacement = r'''int ksu_lsm_unhook(struct ksu_lsm_hook *hook)
+{
+    bool slot_restored = false;
+    void *current;
+    void *expected;
+    void **slot;
+    int ret = 0;
+
+    if (!hook)
+        return -EINVAL;
+
+    mutex_lock(&ksu_lsm_hook_lock);
+
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 12, 0)
+    if (!hook->entry || !hook->scall)
+#else
+    if (!hook->entry)
+#endif
+        goto out_unlock;
+
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 12, 0)
+    slot = (void **)((char *)hook->entry + hook->hook_offset);
+    expected = hook->replacement;
+#else
+    if (hook->entry == &hook->list) {
+        slot = (void **)&hook->list.head->first;
+        expected = &hook->list;
+        pr_info("unhook patch head->first\n");
+    } else {
+        slot = (void **)((char *)hook->entry + hook->hook_offset);
+        expected = hook->replacement;
+        pr_info("unhook patch slot\n");
+    }
+#endif
+
+    current = READ_ONCE(*slot);
+    if (current != expected && current != hook->original) {
+        pr_err("lsm_hook: refusing to restore %s after ownership loss: current=%px expected=%px orig=%px\n",
+               hook->head_name ?: "unknown", current, expected, hook->original);
+        ret = -EBUSY;
+        goto out_unlock;
+    }
+
+#if LINUX_VERSION_CODE < KERNEL_VERSION(6, 12, 0)
+    if (current == expected && hook->entry == &hook->list && READ_ONCE(hook->list.list.next)) {
+        pr_err("lsm_hook: refusing to unlink %s after another hook chained behind KernelSU\n",
+               hook->head_name ?: "unknown");
+        ret = -EBUSY;
+        goto out_unlock;
+    }
+#endif
+
+    if (current == expected) {
+        ret = ksu_lsm_hook_patch_slot(slot, hook->original);
+        if (ret) {
+            pr_err("lsm_hook: failed to restore %s: %d\n", hook->head_name ?: "unknown", ret);
+            goto out_unlock;
+        }
+        slot_restored = true;
+    }
+
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 12, 0)
+    ret = ksu_lsm_hook_update_scall(hook->scall, hook->original);
+    if (ret) {
+        if (slot_restored && ksu_lsm_hook_patch_slot(slot, hook->replacement)) {
+            pr_err("lsm_hook: failed to reapply %s after static call restore failure\n", hook->head_name ?: "unknown");
+            ret = -EUCLEAN;
+        }
+        goto out_unlock;
+    }
+#endif
+
+    synchronize_rcu();
+    pr_info("lsm_hook: restored %s hook slot %px to %px\n", hook->head_name ?: "unknown", slot, hook->original);
+    ksu_lsm_hook_untrack(hook);
+    hook->entry = NULL;
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 12, 0)
+    hook->scall = NULL;
+#endif
+
+out_unlock:
+    mutex_unlock(&ksu_lsm_hook_lock);
+    return ret;
+}
+'''
+          cpath.write_text(text[:start] + replacement + text[end:])
+
+          text = cpath.read_text()
+          text = text.replace(
+              'void ksu_unregister_lsm_hook(struct ksu_lsm_hook *hook)\n{\n    ksu_lsm_unhook(hook);\n}',
+              'void ksu_unregister_lsm_hook(struct ksu_lsm_hook *hook)\n{\n    int ret = ksu_lsm_unhook(hook);\n\n    if (ret)\n        pr_err("lsm_hook: unregister failed for %s: %d\\n", hook && hook->head_name ? hook->head_name : "unknown", ret);\n}',
+              1)
+          old_exit = '''void __exit ksu_lsm_hook_exit(void)
+{
+    struct ksu_lsm_hook *hooks[ARRAY_SIZE(ksu_lsm_hook_entries)];
+    int count;
+    int i;
+
+    mutex_lock(&ksu_lsm_hook_lock);
+    count = ksu_lsm_hook_count;
+    for (i = 0; i < count; i++)
+        hooks[i] = ksu_lsm_hook_entries[i].hook;
+    mutex_unlock(&ksu_lsm_hook_lock);
+
+    for (i = count - 1; i >= 0; i--)
+        ksu_lsm_unhook(hooks[i]);
+}'''
+          new_exit = '''void __exit ksu_lsm_hook_exit(void)
+{
+    struct ksu_lsm_hook *hooks[ARRAY_SIZE(ksu_lsm_hook_entries)];
+    int count;
+    int i;
+
+    mutex_lock(&ksu_lsm_hook_lock);
+    count = ksu_lsm_hook_count;
+    for (i = 0; i < count; i++)
+        hooks[i] = ksu_lsm_hook_entries[i].hook;
+    mutex_unlock(&ksu_lsm_hook_lock);
+
+    for (i = count - 1; i >= 0; i--) {
+        int ret = ksu_lsm_unhook(hooks[i]);
+
+        if (ret) {
+            pr_emerg("lsm_hook: final restore failed for %s: %d\\n",
+                     hooks[i] && hooks[i]->head_name ? hooks[i]->head_name : "unknown", ret);
+            panic("KernelSU: refusing unsafe module unload with live LSM hooks");
+        }
+    }
+}'''
+          if old_exit not in text:
+              raise SystemExit('lsm exit anchor not found')
+          cpath.write_text(text.replace(old_exit, new_exit, 1))
+
+          hpath = Path('kernel/hook/lsm_hook.h')
+          htext = hpath.read_text()
+          old = 'void ksu_lsm_unhook(struct ksu_lsm_hook *hook);'
+          if old not in htext:
+              raise SystemExit('lsm header anchor not found')
+          hpath.write_text(htext.replace(old, 'int ksu_lsm_unhook(struct ksu_lsm_hook *hook);', 1))
+
+          spath = Path('kernel/feature/selinux_hide.c')
+          stext = spath.read_text()
+          old = '''    if (selinux_setprocattr_hook.entry) {
+        ksu_lsm_unhook(&selinux_setprocattr_hook);
+        if (selinux_setprocattr_hook.entry) {
+            ret = -EIO;
+            goto rollback;
+        }
+    }
+'''
+          new = '''    if (selinux_setprocattr_hook.entry) {
+        ret = ksu_lsm_unhook(&selinux_setprocattr_hook);
+        if (ret)
+            goto rollback;
+    }
+'''
+          if old not in stext:
+              raise SystemExit('selinux unhook anchor not found')
+          spath.write_text(stext.replace(old, new, 1))
+          PY
+          clang-format -i kernel/hook/lsm_hook.c kernel/hook/lsm_hook.h kernel/feature/selinux_hide.c
+          git diff --check
+          git diff -- kernel/hook/lsm_hook.c kernel/hook/lsm_hook.h kernel/feature/selinux_hide.c
+      - name: Commit patch
+        shell: bash
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add kernel/hook/lsm_hook.c kernel/hook/lsm_hook.h kernel/feature/selinux_hide.c
+          git commit -m "fix: preserve LSM hook ownership on unhook [lsm-ownership-patched]"
+          git push
