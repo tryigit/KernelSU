@@ -399,40 +399,85 @@ static int ksu_selinux_hide_validate_ownership(void)
 
 static int ksu_selinux_hide_unhook(void)
 {
-    write_op_fn my;
-    int first_err = 0;
+    bool context_restored = false;
+    bool access_restored = false;
+    bool status_restored = false;
+    int rollback_ret = 0;
+    int rollback;
     int ret;
 
     ret = ksu_selinux_hide_validate_ownership();
     if (ret)
         return ret;
 
-    my = my_write_context;
-    if (context_write && READ_ONCE(*context_write) == my) {
+    if (context_write && READ_ONCE(*context_write) == my_write_context) {
         write_op_fn orig = orig_context_write;
         ret = ksu_patch_text(context_write, &orig, sizeof(orig), KSU_PATCH_TEXT_FLUSH_DCACHE);
         if (ret)
-            first_err = ret;
+            goto rollback;
+        context_restored = true;
     }
-    my = my_write_access;
-    if (access_write && READ_ONCE(*access_write) == my) {
+
+    if (access_write && READ_ONCE(*access_write) == my_write_access) {
         write_op_fn orig = orig_access_write;
         ret = ksu_patch_text(access_write, &orig, sizeof(orig), KSU_PATCH_TEXT_FLUSH_DCACHE);
-        if (ret && !first_err)
-            first_err = ret;
+        if (ret)
+            goto rollback;
+        access_restored = true;
     }
+
     if (sel_open_handle_status_slot && READ_ONCE(*sel_open_handle_status_slot) == my_sel_open_handle_status) {
         sel_open_handle_status_fn orig = orig_sel_open_handle_status;
         ret = ksu_patch_text(sel_open_handle_status_slot, &orig, sizeof(orig), KSU_PATCH_TEXT_FLUSH_DCACHE);
-        if (ret && !first_err)
-            first_err = ret;
+        if (ret)
+            goto rollback;
+        status_restored = true;
     }
+
     if (selinux_setprocattr_hook.entry) {
         ksu_lsm_unhook(&selinux_setprocattr_hook);
-        if (selinux_setprocattr_hook.entry && !first_err)
-            first_err = -EIO;
+        if (selinux_setprocattr_hook.entry) {
+            ret = -EIO;
+            goto rollback;
+        }
     }
-    return first_err;
+    return 0;
+
+rollback:
+    if (status_restored) {
+        sel_open_handle_status_fn mine = my_sel_open_handle_status;
+        if (READ_ONCE(*sel_open_handle_status_slot) != orig_sel_open_handle_status) {
+            rollback_ret = -EUCLEAN;
+        } else {
+            rollback = ksu_patch_text(sel_open_handle_status_slot, &mine, sizeof(mine), KSU_PATCH_TEXT_FLUSH_DCACHE);
+            if (rollback)
+                rollback_ret = rollback;
+        }
+    }
+
+    if (access_restored) {
+        write_op_fn mine = my_write_access;
+        if (READ_ONCE(*access_write) != orig_access_write) {
+            rollback_ret = -EUCLEAN;
+        } else {
+            rollback = ksu_patch_text(access_write, &mine, sizeof(mine), KSU_PATCH_TEXT_FLUSH_DCACHE);
+            if (rollback)
+                rollback_ret = rollback;
+        }
+    }
+
+    if (context_restored) {
+        write_op_fn mine = my_write_context;
+        if (READ_ONCE(*context_write) != orig_context_write) {
+            rollback_ret = -EUCLEAN;
+        } else {
+            rollback = ksu_patch_text(context_write, &mine, sizeof(mine), KSU_PATCH_TEXT_FLUSH_DCACHE);
+            if (rollback)
+                rollback_ret = rollback;
+        }
+    }
+
+    return rollback_ret ? -EUCLEAN : ret;
 }
 
 static int ksu_selinux_hide_disable(void)
