@@ -18,7 +18,16 @@ static bool ksu_task_needs_syscall_hook(struct task_struct *task, const struct c
 
 bool ksu_current_task_needs_syscall_hook(void)
 {
-    return ksu_task_needs_syscall_hook(current, current_cred(), current_uid().val);
+    /*
+     * The syscall tracepoint mark is also exposed through KSU_MARK_MARK.
+     * Treat it as authoritative here so explicit marks are not rejected by
+     * the automatic policy predicate used when refreshing selective marks.
+     */
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(5, 11, 0)
+    return test_task_syscall_work(current, SYSCALL_TRACEPOINT);
+#else
+    return test_tsk_thread_flag(current, TIF_SYSCALL_TRACEPOINT);
+#endif
 }
 
 static void handle_process_mark(bool mark_all, bool clear_unneeded)
