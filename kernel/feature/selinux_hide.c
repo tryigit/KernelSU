@@ -414,7 +414,7 @@ static int ksu_selinux_hide_unhook(void)
         write_op_fn orig = orig_context_write;
         ret = ksu_patch_text(context_write, &orig, sizeof(orig), KSU_PATCH_TEXT_FLUSH_DCACHE);
         if (ret)
-  goto rollback;
+            goto rollback;
         context_restored = true;
     }
 
@@ -422,7 +422,7 @@ static int ksu_selinux_hide_unhook(void)
         write_op_fn orig = orig_access_write;
         ret = ksu_patch_text(access_write, &orig, sizeof(orig), KSU_PATCH_TEXT_FLUSH_DCACHE);
         if (ret)
-  goto rollback;
+            goto rollback;
         access_restored = true;
     }
 
@@ -430,15 +430,15 @@ static int ksu_selinux_hide_unhook(void)
         sel_open_handle_status_fn orig = orig_sel_open_handle_status;
         ret = ksu_patch_text(sel_open_handle_status_slot, &orig, sizeof(orig), KSU_PATCH_TEXT_FLUSH_DCACHE);
         if (ret)
-  goto rollback;
+            goto rollback;
         status_restored = true;
     }
 
     if (selinux_setprocattr_hook.entry) {
         ksu_lsm_unhook(&selinux_setprocattr_hook);
         if (selinux_setprocattr_hook.entry) {
-  ret = -EIO;
-  goto rollback;
+            ret = -EIO;
+            goto rollback;
         }
     }
     return 0;
@@ -447,33 +447,33 @@ rollback:
     if (status_restored) {
         sel_open_handle_status_fn mine = my_sel_open_handle_status;
         if (READ_ONCE(*sel_open_handle_status_slot) != orig_sel_open_handle_status) {
-  rollback_ret = -EUCLEAN;
+            rollback_ret = -EUCLEAN;
         } else {
-  rollback = ksu_patch_text(sel_open_handle_status_slot, &mine, sizeof(mine), KSU_PATCH_TEXT_FLUSH_DCACHE);
-  if (rollback)
-      rollback_ret = rollback;
+            rollback = ksu_patch_text(sel_open_handle_status_slot, &mine, sizeof(mine), KSU_PATCH_TEXT_FLUSH_DCACHE);
+            if (rollback)
+                rollback_ret = rollback;
         }
     }
 
     if (access_restored) {
         write_op_fn mine = my_write_access;
         if (READ_ONCE(*access_write) != orig_access_write) {
-  rollback_ret = -EUCLEAN;
+            rollback_ret = -EUCLEAN;
         } else {
-  rollback = ksu_patch_text(access_write, &mine, sizeof(mine), KSU_PATCH_TEXT_FLUSH_DCACHE);
-  if (rollback)
-      rollback_ret = rollback;
+            rollback = ksu_patch_text(access_write, &mine, sizeof(mine), KSU_PATCH_TEXT_FLUSH_DCACHE);
+            if (rollback)
+                rollback_ret = rollback;
         }
     }
 
     if (context_restored) {
         write_op_fn mine = my_write_context;
         if (READ_ONCE(*context_write) != orig_context_write) {
-  rollback_ret = -EUCLEAN;
+            rollback_ret = -EUCLEAN;
         } else {
-  rollback = ksu_patch_text(context_write, &mine, sizeof(mine), KSU_PATCH_TEXT_FLUSH_DCACHE);
-  if (rollback)
-      rollback_ret = rollback;
+            rollback = ksu_patch_text(context_write, &mine, sizeof(mine), KSU_PATCH_TEXT_FLUSH_DCACHE);
+            if (rollback)
+                rollback_ret = rollback;
         }
     }
 
