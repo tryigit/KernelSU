@@ -395,7 +395,7 @@ out_unlock:
 
 void ksu_lsm_unhook(struct ksu_lsm_hook *hook)
 {
-    void *current;
+    void *slot_value;
     void *expected;
     void **slot;
 
@@ -426,29 +426,29 @@ void ksu_lsm_unhook(struct ksu_lsm_hook *hook)
     }
 #endif
 
-    current = READ_ONCE(*slot);
-    if (current != expected && current != hook->original) {
+    slot_value = READ_ONCE(*slot);
+    if (slot_value != expected && slot_value != hook->original) {
         pr_err("lsm_hook: refusing to restore %s after ownership loss: current=%px expected=%px orig=%px\n",
-               hook->head_name ?: "unknown", current, expected, hook->original);
+               hook->head_name ?: "unknown", slot_value, expected, hook->original);
         goto out_unlock;
     }
 
 #if LINUX_VERSION_CODE < KERNEL_VERSION(6, 12, 0)
-    if (current == expected && hook->entry == &hook->list && READ_ONCE(hook->list.list.next)) {
+    if (slot_value == expected && hook->entry == &hook->list && READ_ONCE(hook->list.list.next)) {
         pr_err("lsm_hook: refusing to unlink %s after another hook chained behind KernelSU\n",
                hook->head_name ?: "unknown");
         goto out_unlock;
     }
 #endif
 
-    if (current == expected && ksu_lsm_hook_patch_slot(slot, hook->original)) {
+    if (slot_value == expected && ksu_lsm_hook_patch_slot(slot, hook->original)) {
         pr_err("lsm_hook: failed to restore %s\n", hook->head_name ?: "unknown");
         goto out_unlock;
     }
 
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 12, 0)
     if (ksu_lsm_hook_update_scall(hook->scall, hook->original)) {
-        if (current == expected && ksu_lsm_hook_patch_slot(slot, hook->replacement))
+        if (slot_value == expected && ksu_lsm_hook_patch_slot(slot, hook->replacement))
             pr_err("lsm_hook: failed to reapply %s after static call restore failure\n", hook->head_name ?: "unknown");
         goto out_unlock;
     }
