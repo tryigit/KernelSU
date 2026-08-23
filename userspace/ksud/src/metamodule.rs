@@ -165,28 +165,32 @@ fn register_module_mounts() -> Result<()> {
         return Ok(());
     }
 
-    let mut added = Vec::new();
+    let mut first_error = None;
     for mount in &mounts {
         match ksucalls::umount_list_add(mount, 0) {
-            Ok(()) => added.push(mount.clone()),
+            Ok(()) => {}
             Err(err) if io_errno(&err) == Some(libc::EEXIST) => {
                 debug!("Module mount already registered: {mount}");
             }
             Err(err) => {
-                for registered in added.iter().rev() {
-                    if let Err(rollback_err) = ksucalls::umount_list_del(registered) {
-                        warn!(
-                            "Failed to roll back module mount registration {registered}: {rollback_err:#}"
-                        );
-                    }
+                warn!("Failed to register module mount {mount}: {err:#}");
+                if first_error.is_none() {
+                    first_error =
+                        Some(err.context(format!("Failed to register module mount {mount}")));
                 }
-                return Err(err)
-                    .with_context(|| format!("Failed to register module mount {mount}"));
             }
         }
     }
 
+    // Real mounts remain installed even when one registration fails. Never
+    // roll back successful isolation entries, and always enable the kernel
+    // unmount path so every entry that did register still protects app
+    // namespaces.
     ksucalls::report_module_mounted();
+
+    if let Some(err) = first_error {
+        return Err(err);
+    }
     Ok(())
 }
 
@@ -232,7 +236,6 @@ pub fn check_install_safety() -> Result<(), bool> {
 /// Create or update the metamodule symlink
 /// Points /data/adb/metamodule -> /data/adb/modules/{module_id}
 pub fn ensure_symlink(module_path: &Path) -> Result<()> {
-    // METAMODULE_DIR might have trailing slash, so we need to trim it
     let symlink_path = Path::new(defs::METAMODULE_DIR.trim_end_matches('/'));
 
     info!(
@@ -241,19 +244,16 @@ pub fn ensure_symlink(module_path: &Path) -> Result<()> {
         module_path.display()
     );
 
-    // Remove existing symlink if it exists
     if symlink_path.exists() || symlink_path.is_symlink() {
         info!("Removing old metamodule symlink/path");
         if symlink_path.is_symlink() {
             std::fs::remove_file(symlink_path).with_context(|| "Failed to remove old symlink")?;
         } else {
-            // Could be a directory, remove it
             std::fs::remove_dir_all(symlink_path)
                 .with_context(|| "Failed to remove old directory")?;
         }
     }
 
-    // Create symlink
     #[cfg(unix)]
     std::os::unix::fs::symlink(module_path, symlink_path)
         .with_context(|| format!("Failed to create symlink to {}", module_path.display()))?;
@@ -282,8 +282,6 @@ pub fn get_install_script(
     installer_content: &str,
     install_module_script: &str,
 ) -> Result<String> {
-    // Check if there's a metamodule with metainstall.sh
-    // Only apply this logic for regular modules (not when installing metamodule itself)
     let install_script = if is_metamodule {
         info!("Installing metamodule, using default installer");
         install_module_script.to_string()
@@ -312,20 +310,14 @@ pub fn get_install_script(
     Ok(install_script)
 }
 
-/// Check if metamodule script exists and is ready to execute
-/// Returns None if metamodule doesn't exist, is disabled, or script is missing
-/// Returns Some(script_path) if script is ready to execute
 fn check_metamodule_script(script_name: &str) -> Option<PathBuf> {
-    // Check if metamodule exists
     let metamodule_path = get_metamodule_path()?;
 
-    // Check if metamodule is disabled
     if metamodule_path.join(defs::DISABLE_FILE_NAME).exists() {
         info!("Metamodule is disabled, skipping {script_name}");
         return None;
     }
 
-    // Check if script exists
     let script_path = metamodule_path.join(script_name);
     if !script_path.exists() {
         return None;
@@ -334,7 +326,6 @@ fn check_metamodule_script(script_name: &str) -> Option<PathBuf> {
     Some(script_path)
 }
 
-/// Execute metamodule's metauninstall.sh for a specific module
 pub fn exec_metauninstall_script(module_id: &str) -> Result<()> {
     let Some(metauninstall_path) = check_metamodule_script(defs::METAMODULE_METAUNINSTALL_SCRIPT)
     else {
@@ -361,7 +352,6 @@ pub fn exec_metauninstall_script(module_id: &str) -> Result<()> {
     Ok(())
 }
 
-/// Execute metamodule mount script
 pub fn exec_mount_script(module_dir: &str) -> Result<()> {
     let Some(mount_script) = check_metamodule_script(defs::METAMODULE_MOUNT_SCRIPT) else {
         return Ok(());
@@ -377,9 +367,6 @@ pub fn exec_mount_script(module_dir: &str) -> Result<()> {
         .env("MODULE_DIR", module_dir)
         .status()?;
 
-    // Inspect and register mounts even when the script failed so partial mounts
-    // do not silently escape app-namespace isolation. A successful script must
-    // also have a fully successful registration transaction.
     let registration = register_module_mounts();
 
     ensure!(
@@ -392,7 +379,6 @@ pub fn exec_mount_script(module_dir: &str) -> Result<()> {
     Ok(())
 }
 
-/// Execute metamodule script for a specific stage
 pub fn exec_stage_script(stage: &str, block: bool) -> Result<()> {
     let Some(script_path) = check_metamodule_script(&format!("{stage}.sh")) else {
         return Ok(());

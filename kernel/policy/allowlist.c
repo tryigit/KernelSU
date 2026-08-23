@@ -2,6 +2,7 @@
 #include <linux/limits.h>
 #include <linux/rculist.h>
 #include <linux/mutex.h>
+#include <linux/module.h>
 #include <linux/task_work.h>
 #include <linux/capability.h>
 #include <linux/compiler.h>
@@ -455,6 +456,7 @@ close_file:
 out:
     revert_creds(saved);
     kfree(_cb);
+    module_put(THIS_MODULE);
 }
 
 void ksu_persistent_allow_list()
@@ -476,7 +478,13 @@ void ksu_persistent_allow_list()
         goto put_task;
     }
     cb->func = do_persistent_allow_list;
+    if (!try_module_get(THIS_MODULE)) {
+        kfree(cb);
+        pr_warn("save_allow_list cannot pin unloading module\n");
+        goto put_task;
+    }
     if (task_work_add(tsk, cb, TWA_RESUME)) {
+        module_put(THIS_MODULE);
         kfree(cb);
         pr_warn("save_allow_list add task_work failed\n");
     }
