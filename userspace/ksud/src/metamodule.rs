@@ -177,6 +177,7 @@ fn register_module_mounts() -> Result<()> {
     }
 
     let mut first_error = None;
+    let mut failed_mounts = Vec::new();
     for mount in &mounts {
         match ksucalls::umount_list_add(mount, 0) {
             Ok(()) => {}
@@ -187,20 +188,7 @@ fn register_module_mounts() -> Result<()> {
                 let registration_error =
                     err.context(format!("Failed to register module mount {mount}"));
                 warn!("{registration_error:#}");
-
-                #[cfg(target_os = "android")]
-                if let Err(detach_err) = detach_unregistered_mount(mount) {
-                    warn!(
-                        "Failed to fail-close unregistered module mount {mount}: {detach_err:#}"
-                    );
-                    if first_error.is_none() {
-                        first_error = Some(registration_error.context(format!(
-                            "also failed to detach unprotected mount: {detach_err:#}"
-                        )));
-                    }
-                    continue;
-                }
-
+                failed_mounts.push(mount.clone());
                 if first_error.is_none() {
                     first_error = Some(registration_error);
                 }
@@ -208,9 +196,18 @@ fn register_module_mounts() -> Result<()> {
         }
     }
 
-    // Keep every successfully registered mount protected. A mount that cannot
-    // be registered is detached above on Android rather than left visible to
-    // future app namespaces.
+    #[cfg(target_os = "android")]
+    for mount in failed_mounts.iter().rev() {
+        if let Err(detach_err) = detach_unregistered_mount(mount) {
+            warn!(
+                "Failed to fail-close unregistered module mount {mount}: {detach_err:#}"
+            );
+        }
+    }
+
+    // Keep every successfully registered mount protected. Failed registrations
+    // are detached deepest-first only after the registration pass, so no stale
+    // isolation entry can be created against an already-detached subtree.
     ksucalls::report_module_mounted();
 
     if let Some(err) = first_error {
