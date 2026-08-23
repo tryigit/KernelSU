@@ -93,10 +93,29 @@ fn mount_metamodule_without_app_spawn(module_dir: &str) -> Result<()> {
     stop_android_services_for_mount()?;
 
     if let Err(err) = metamodule::exec_mount_script(module_dir) {
-        warn!(
-            "late-load: metamodule mount synchronization failed; leaving Android services stopped"
-        );
-        return Err(err).context("metamodule mount synchronization failed");
+        match metamodule::register_module_mounts() {
+            Ok(()) => {
+                warn!(
+                    "late-load: metamodule mount failed but isolation resync is safe; restarting Android services"
+                );
+                if let Err(start_err) = start_android_services() {
+                    return Err(start_err).context(format!(
+                        "metamodule mount failed: {err:#}; isolation recovered, but Android service restart failed"
+                    ));
+                }
+                return Err(err).context(
+                    "metamodule mount failed; isolation recovered and Android services restarted",
+                );
+            }
+            Err(sync_err) => {
+                warn!(
+                    "late-load: metamodule mount and isolation resync failed; leaving Android services stopped"
+                );
+                return Err(err).context(format!(
+                    "isolation resync also failed: {sync_err:#}; Android services left stopped"
+                ));
+            }
+        }
     }
 
     start_android_services().context("failed to restart Android services after metamodule mount")
