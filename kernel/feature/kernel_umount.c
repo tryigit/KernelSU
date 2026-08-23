@@ -8,6 +8,7 @@
 #include <linux/nsproxy.h>
 #include <linux/path.h>
 #include <linux/printk.h>
+#include <linux/string.h>
 #include <linux/types.h>
 
 #include "feature/kernel_umount.h"
@@ -115,12 +116,40 @@ int ksu_handle_umount(uid_t old_uid, uid_t new_uid)
     struct mount_entry *entry;
     down_read(&mount_list_lock);
     list_for_each_entry (entry, &mount_list, list) {
+        struct mount_entry *other;
+        unsigned int flags = 0;
+        unsigned int layers = 0;
         unsigned int layer;
+        bool seen = false;
 
-        pr_debug("%s: unmounting: %s flags: 0x%x layers: %u\n", __func__, entry->umountable, entry->flags,
-                 entry->layers);
-        for (layer = 0; layer < entry->layers; layer++)
-            try_umount(entry->umountable, entry->flags);
+        /*
+         * A path can have both an unmanaged/manual entry and an auto-managed
+         * entry. Treat them as one isolation target: summing layer counts
+         * could unmount through the KernelSU stack into the real system mount,
+         * while processing only one entry could leave a lower KSU layer visible.
+         */
+        list_for_each_entry (other, &mount_list, list) {
+            if (other == entry)
+                break;
+            if (!strcmp(other->umountable, entry->umountable)) {
+                seen = true;
+                break;
+            }
+        }
+        if (seen)
+            continue;
+
+        list_for_each_entry (other, &mount_list, list) {
+            if (strcmp(other->umountable, entry->umountable))
+                continue;
+            flags |= other->flags;
+            if (other->layers > layers)
+                layers = other->layers;
+        }
+
+        pr_debug("%s: unmounting: %s flags: 0x%x layers: %u\n", __func__, entry->umountable, flags, layers);
+        for (layer = 0; layer < layers; layer++)
+            try_umount(entry->umountable, flags);
     }
     up_read(&mount_list_lock);
 
