@@ -115,8 +115,12 @@ int ksu_handle_umount(uid_t old_uid, uid_t new_uid)
     struct mount_entry *entry;
     down_read(&mount_list_lock);
     list_for_each_entry (entry, &mount_list, list) {
-        pr_debug("%s: unmounting: %s flags: 0x%x\n", __func__, entry->umountable, entry->flags);
-        try_umount(entry->umountable, entry->flags);
+        unsigned int layer;
+
+        pr_debug("%s: unmounting: %s flags: 0x%x layers: %u\n", __func__, entry->umountable, entry->flags,
+                 entry->layers);
+        for (layer = 0; layer < entry->layers; layer++)
+            try_umount(entry->umountable, entry->flags);
     }
     up_read(&mount_list_lock);
 
