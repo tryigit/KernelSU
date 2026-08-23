@@ -16,7 +16,9 @@ struct mount_entry {
     char *umountable;
     unsigned int flags;
     unsigned int layers;
+    unsigned int managed_layers;
     bool managed;
+    bool unmanaged;
     struct list_head list;
 };
 extern struct list_head mount_list;
