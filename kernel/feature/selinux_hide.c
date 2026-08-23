@@ -168,7 +168,7 @@ static ssize_t my_write_access(struct file *file, char *buf, size_t size)
     length = security_context_str_to_sid(&fake_state, scon, &ssid, GFP_KERNEL);
     if (length)
         goto out;
-    length = security_context_str_to_sid(&fake_state, tcon, &tsid, GFP_KERNEL);
+    length = security_context_str_to_sid(&fake_state, tcon, strlen(tcon), &tsid, GFP_KERNEL);
     if (length)
         goto out;
     security_compute_av_user(&fake_state, ssid, tsid, tclass, &avd);
@@ -579,7 +579,7 @@ int ksu_selinux_hide_prepare_unload(void)
     ret = ksu_selinux_hide_unhook();
     if (ret) {
         mutex_unlock(&selinux_hide_mutex);
-        return -EUCLEAN;
+        return ret;
     }
     selinux_hide_unload_prepared = true;
     mutex_unlock(&selinux_hide_mutex);
