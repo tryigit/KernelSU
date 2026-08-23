@@ -318,7 +318,9 @@ pub fn unload() -> Result<()> {
 
     if let Some(Err(restart_err)) = restart_result {
         return match result {
-            Ok(()) => Err(restart_err.context("KernelSU unloaded but Android service restart failed")),
+            Ok(()) => {
+                Err(restart_err.context("KernelSU unloaded but Android service restart failed"))
+            }
             Err(unload_err) => Err(unload_err.context(format!(
                 "Android service restart also failed: {restart_err:#}"
             ))),
