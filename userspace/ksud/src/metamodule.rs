@@ -127,6 +127,7 @@ fn io_errno(err: &anyhow::Error) -> Option<i32> {
 
 #[cfg(target_os = "android")]
 fn detach_unregistered_mount(mount: &str) -> Result<()> {
+    ensure!(mount != "/", "Refusing to detach the root mount");
     let mount = std::ffi::CString::new(mount).context("Module mount path contains NUL")?;
     let ret = unsafe { libc::umount2(mount.as_ptr(), libc::MNT_DETACH) };
     if ret != 0 {
@@ -197,17 +198,35 @@ fn register_module_mounts() -> Result<()> {
     }
 
     #[cfg(target_os = "android")]
-    for mount in failed_mounts.iter().rev() {
-        if let Err(detach_err) = detach_unregistered_mount(mount) {
-            warn!(
-                "Failed to fail-close unregistered module mount {mount}: {detach_err:#}"
-            );
+    {
+        let mut detached_roots = Vec::new();
+        for mount in failed_mounts.iter().rev() {
+            match detach_unregistered_mount(mount) {
+                Ok(()) => detached_roots.push(mount.as_str()),
+                Err(detach_err) => warn!(
+                    "Failed to fail-close unregistered module mount {mount}: {detach_err:#}"
+                ),
+            }
+        }
+
+        if !detached_roots.is_empty() {
+            for mount in &mounts {
+                if detached_roots
+                    .iter()
+                    .any(|root| path_is_at_or_under(mount, root))
+                    && let Err(cleanup_err) = ksucalls::umount_list_del(mount)
+                {
+                    warn!(
+                        "Failed to remove stale isolation entry {mount} after mount detach: {cleanup_err:#}"
+                    );
+                }
+            }
         }
     }
 
-    // Keep every successfully registered mount protected. Failed registrations
-    // are detached deepest-first only after the registration pass, so no stale
-    // isolation entry can be created against an already-detached subtree.
+    // Keep every successfully registered mount protected. If a failed parent
+    // is detached, remove descendant entries too because lazy unmount detaches
+    // that subtree and those paths must not later target an underlying mount.
     ksucalls::report_module_mounted();
 
     if let Some(err) = first_error {
