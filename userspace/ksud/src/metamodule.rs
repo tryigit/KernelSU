@@ -199,10 +199,13 @@ fn register_module_mounts() -> Result<()> {
 /// - Err(true) means metamodule is disabled
 /// - Err(false) means metamodule is in other unstable state
 pub fn check_install_safety() -> Result<(), bool> {
+    // No metamodule → safe
     let Some(metamodule_path) = get_metamodule_path() else {
         return Ok(());
     };
 
+    // No metainstall.sh → safe (uses default installer)
+    // The staged update directory may contain the latest scripts, so check both locations
     let has_metainstall = metamodule_path
         .join(defs::METAMODULE_METAINSTALL_SCRIPT)
         .exists()
@@ -216,17 +219,22 @@ pub fn check_install_safety() -> Result<(), bool> {
         return Ok(());
     }
 
+    // Check for marker files
     let has_update = metamodule_path.join(defs::UPDATE_FILE_NAME).exists();
     let has_remove = metamodule_path.join(defs::REMOVE_FILE_NAME).exists();
     let has_disable = metamodule_path.join(defs::DISABLE_FILE_NAME).exists();
 
+    // Stable state (no markers) → safe
     if !has_update && !has_remove && !has_disable {
         return Ok(());
     }
 
+    // Return true if disabled, false for other unstable states
     Err(has_disable && !has_update && !has_remove)
 }
 
+/// Create or update the metamodule symlink
+/// Points /data/adb/metamodule -> /data/adb/modules/{module_id}
 pub fn ensure_symlink(module_path: &Path) -> Result<()> {
     let symlink_path = Path::new(defs::METAMODULE_DIR.trim_end_matches('/'));
 
@@ -254,6 +262,7 @@ pub fn ensure_symlink(module_path: &Path) -> Result<()> {
     Ok(())
 }
 
+/// Remove the metamodule symlink
 pub fn remove_symlink() -> Result<()> {
     let symlink_path = Path::new(defs::METAMODULE_DIR.trim_end_matches('/'));
 
@@ -266,6 +275,8 @@ pub fn remove_symlink() -> Result<()> {
     Ok(())
 }
 
+/// Get the install script content, using metainstall.sh from metamodule if available
+/// Returns the script content to be executed
 pub fn get_install_script(
     is_metamodule: bool,
     installer_content: &str,
