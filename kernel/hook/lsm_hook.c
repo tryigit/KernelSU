@@ -125,6 +125,19 @@ int ksu_lsm_hook(struct ksu_lsm_hook *hook)
         goto out_unlock;
     }
 
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 12, 0)
+    /*
+     * security_hook_heads no longer exists here. The static-call table is a
+     * randomized struct whose per-hook arrays are MAX_LSM_COUNT wide, so the
+     * legacy numeric head offset cannot be mapped safely at runtime.
+     */
+    if (hook->offset) {
+        pr_err("lsm_hook: nonzero hook offsets are unsupported with LSM static calls\n");
+        ret = -EOPNOTSUPP;
+        goto out_unlock;
+    }
+#endif
+
     target = hook->original;
     if (!target)
         target = ksu_resolve_symbol_for_functable_hook(target_name);
