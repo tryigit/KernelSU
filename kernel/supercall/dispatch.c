@@ -526,6 +526,7 @@ static int do_nuke_ext4_sysfs(void __user *arg)
 }
 
 #define KSU_MAX_UMOUNT_ENTRIES 512U
+#define KSU_MAX_UMOUNT_LAYERS 512U
 
 struct list_head mount_list = LIST_HEAD_INIT(mount_list);
 DECLARE_RWSEM(mount_list_lock);
@@ -549,6 +550,15 @@ static int copy_umount_path(char *buf, size_t size, const char __user *path)
     return 0;
 }
 
+static void free_mount_entry(struct mount_entry *entry)
+{
+    list_del(&entry->list);
+    kfree(entry->umountable);
+    kfree(entry);
+    if (mount_list_count)
+        --mount_list_count;
+}
+
 static int add_try_umount(void __user *arg)
 {
     struct mount_entry *new_entry, *entry, *tmp;
@@ -560,22 +570,28 @@ static int add_try_umount(void __user *arg)
         return -EFAULT;
 
     switch (cmd.mode) {
-    case KSU_UMOUNT_WIPE: {
-        struct mount_entry *entry, *tmp;
+    case KSU_UMOUNT_WIPE:
         down_write(&mount_list_lock);
         list_for_each_entry_safe (entry, tmp, &mount_list, list) {
             pr_info("wipe_umount_list: removing entry: %s\n", entry->umountable);
-            list_del(&entry->list);
-            kfree(entry->umountable);
-            kfree(entry);
+            free_mount_entry(entry);
         }
         mount_list_count = 0;
         up_write(&mount_list_lock);
-
         return 0;
-    }
 
-    case KSU_UMOUNT_ADD: {
+    case KSU_UMOUNT_MANAGED_WIPE:
+        down_write(&mount_list_lock);
+        list_for_each_entry_safe (entry, tmp, &mount_list, list) {
+            if (!entry->managed)
+                continue;
+            pr_info("wipe_managed_umount_list: removing entry: %s\n", entry->umountable);
+            free_mount_entry(entry);
+        }
+        up_write(&mount_list_lock);
+        return 0;
+
+    case KSU_UMOUNT_ADD:
         ret = copy_umount_path(buf, sizeof(buf), (const char __user *)cmd.arg);
         if (ret)
             return ret;
@@ -583,7 +599,6 @@ static int add_try_umount(void __user *arg)
         new_entry = kzalloc(sizeof(*new_entry), GFP_KERNEL);
         if (!new_entry)
             return -ENOMEM;
-
         new_entry->umountable = kstrdup(buf, GFP_KERNEL);
         if (!new_entry->umountable) {
             kfree(new_entry);
@@ -591,8 +606,6 @@ static int add_try_umount(void __user *arg)
         }
 
         down_write(&mount_list_lock);
-
-        // disallow dupes
         list_for_each_entry (entry, &mount_list, list) {
             if (!strcmp(entry->umountable, buf)) {
                 pr_info("cmd_add_try_umount: %s is already here!\n", buf);
@@ -602,24 +615,79 @@ static int add_try_umount(void __user *arg)
                 return -EEXIST;
             }
         }
-
         if (mount_list_count >= KSU_MAX_UMOUNT_ENTRIES) {
             up_write(&mount_list_lock);
             kfree(new_entry->umountable);
             kfree(new_entry);
             return -E2BIG;
         }
-
         new_entry->flags = cmd.flags;
+        new_entry->layers = 1;
+        new_entry->managed = false;
         list_add(&new_entry->list, &mount_list);
         ++mount_list_count;
         up_write(&mount_list_lock);
         pr_info("cmd_add_try_umount: %s added!\n", buf);
-
         return 0;
-    }
 
-    case KSU_UMOUNT_DEL: {
+    case KSU_UMOUNT_MANAGED_SET:
+        if (!cmd.flags || cmd.flags > KSU_MAX_UMOUNT_LAYERS)
+            return -EINVAL;
+        ret = copy_umount_path(buf, sizeof(buf), (const char __user *)cmd.arg);
+        if (ret)
+            return ret;
+
+        down_write(&mount_list_lock);
+        list_for_each_entry (entry, &mount_list, list) {
+            if (entry->managed && !strcmp(entry->umountable, buf)) {
+                entry->layers = cmd.flags;
+                up_write(&mount_list_lock);
+                pr_info("cmd_set_managed_umount: %s layers=%u\n", buf, cmd.flags);
+                return 0;
+            }
+        }
+        if (mount_list_count >= KSU_MAX_UMOUNT_ENTRIES) {
+            up_write(&mount_list_lock);
+            return -E2BIG;
+        }
+        up_write(&mount_list_lock);
+
+        new_entry = kzalloc(sizeof(*new_entry), GFP_KERNEL);
+        if (!new_entry)
+            return -ENOMEM;
+        new_entry->umountable = kstrdup(buf, GFP_KERNEL);
+        if (!new_entry->umountable) {
+            kfree(new_entry);
+            return -ENOMEM;
+        }
+        new_entry->flags = 0;
+        new_entry->layers = cmd.flags;
+        new_entry->managed = true;
+
+        down_write(&mount_list_lock);
+        /* Another setter can race allocation; update it instead of duplicating. */
+        list_for_each_entry (entry, &mount_list, list) {
+            if (entry->managed && !strcmp(entry->umountable, buf)) {
+                entry->layers = cmd.flags;
+                up_write(&mount_list_lock);
+                kfree(new_entry->umountable);
+                kfree(new_entry);
+                return 0;
+            }
+        }
+        if (mount_list_count >= KSU_MAX_UMOUNT_ENTRIES) {
+            up_write(&mount_list_lock);
+            kfree(new_entry->umountable);
+            kfree(new_entry);
+            return -E2BIG;
+        }
+        list_add(&new_entry->list, &mount_list);
+        ++mount_list_count;
+        up_write(&mount_list_lock);
+        pr_info("cmd_set_managed_umount: %s added layers=%u\n", buf, cmd.flags);
+        return 0;
+
+    case KSU_UMOUNT_DEL:
         ret = copy_umount_path(buf, sizeof(buf), (const char __user *)cmd.arg);
         if (ret)
             return ret;
@@ -628,27 +696,17 @@ static int add_try_umount(void __user *arg)
         list_for_each_entry_safe (entry, tmp, &mount_list, list) {
             if (!strcmp(entry->umountable, buf)) {
                 pr_info("cmd_add_try_umount: entry removed: %s\n", entry->umountable);
-                list_del(&entry->list);
-                kfree(entry->umountable);
-                kfree(entry);
-                if (mount_list_count)
-                    --mount_list_count;
+                free_mount_entry(entry);
                 break;
             }
         }
         up_write(&mount_list_lock);
-
         return 0;
-    }
 
-    default: {
+    default:
         pr_err("cmd_add_try_umount: invalid operation %u\n", cmd.mode);
         return -EINVAL;
     }
-
-    } // switch(cmd.mode)
-
-    return 0;
 }
 
 static int do_set_init_pgrp(void __user *arg)
