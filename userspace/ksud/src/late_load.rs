@@ -1,10 +1,15 @@
-use anyhow::{Context, Result};
+use anyhow::{Context, Result, anyhow, bail, ensure};
 use log::{info, warn};
 use rustix::cstr;
 use std::process::Command;
+use std::thread;
+use std::time::Duration;
 
 use crate::module::{handle_updated_modules, prune_modules};
 use crate::{assets, defs, init_event, metamodule, restorecon, utils};
+
+const ZYGOTE_STOP_RETRIES: usize = 100;
+const ZYGOTE_STOP_RETRY_DELAY: Duration = Duration::from_millis(50);
 
 fn dump_process_info(label: &str) {
     use rustix::process::{getgid, getgroups, getpid, getuid};
@@ -33,6 +38,53 @@ fn dump_process_info(label: &str) {
         groups.join(","),
         selinux.trim(),
     );
+}
+
+fn zygote_services_stopped() -> bool {
+    ["init.svc.zygote", "init.svc.zygote_secondary"]
+        .iter()
+        .all(|name| utils::getprop(name).is_none_or(|state| state == "stopped"))
+}
+
+fn stop_android_services_for_mount() -> Result<()> {
+    let status = Command::new("stop")
+        .status()
+        .context("failed to execute Android stop command")?;
+    ensure!(status.success(), "Android stop exited with status {status}");
+
+    for _ in 0..ZYGOTE_STOP_RETRIES {
+        if zygote_services_stopped() {
+            return Ok(());
+        }
+        thread::sleep(ZYGOTE_STOP_RETRY_DELAY);
+    }
+
+    bail!("zygote services did not stop before metamodule mount synchronization")
+}
+
+fn start_android_services() -> Result<()> {
+    let status = Command::new("start")
+        .status()
+        .context("failed to execute Android start command")?;
+    ensure!(status.success(), "Android start exited with status {status}");
+    Ok(())
+}
+
+fn mount_metamodule_without_app_spawn(module_dir: &str) -> Result<()> {
+    info!("late-load: stopping Android services before metamodule mount synchronization");
+    stop_android_services_for_mount()?;
+
+    let mount_result = metamodule::exec_mount_script(module_dir);
+    let start_result = start_android_services();
+
+    match (mount_result, start_result) {
+        (Ok(()), Ok(())) => Ok(()),
+        (Err(mount_err), Ok(())) => Err(mount_err).context("metamodule mount synchronization failed"),
+        (Ok(()), Err(start_err)) => Err(start_err).context("failed to restart Android services after metamodule mount"),
+        (Err(mount_err), Err(start_err)) => Err(anyhow!(
+            "metamodule mount synchronization failed: {mount_err:#}; Android service restart also failed: {start_err:#}"
+        )),
+    }
 }
 
 pub fn run(package_name: &String, kmi: Option<String>, allow_shell: bool) -> Result<()> {
@@ -115,10 +167,9 @@ pub fn run(package_name: &String, kmi: Option<String>, allow_shell: bool) -> Res
         warn!("load system.prop failed: {e}");
     }
 
-    // 10. Execute metamodule mount script (OverlayFS)
-    if let Err(e) = metamodule::exec_mount_script(defs::MODULE_DIR) {
-        warn!("execute metamodule mount failed: {e}");
-    }
+    // 10. Stop zygote-backed app spawning while the metamodule creates mounts
+    // and the kernel isolation list is synchronized from the resulting stack.
+    mount_metamodule_without_app_spawn(defs::MODULE_DIR)?;
 
     // 11. Execute post-mount stage scripts (blocking)
     init_event::run_stage("post-mount", true);
