@@ -559,6 +559,15 @@ static void free_mount_entry(struct mount_entry *entry)
         --mount_list_count;
 }
 
+static void update_mount_entry_layers(struct mount_entry *entry)
+{
+    unsigned int layers = entry->unmanaged ? 1U : 0U;
+
+    if (entry->managed && entry->managed_layers > layers)
+        layers = entry->managed_layers;
+    entry->layers = layers;
+}
+
 static int add_try_umount(void __user *arg)
 {
     struct mount_entry *new_entry, *entry, *tmp;
@@ -585,6 +594,12 @@ static int add_try_umount(void __user *arg)
         list_for_each_entry_safe (entry, tmp, &mount_list, list) {
             if (!entry->managed)
                 continue;
+            if (entry->unmanaged) {
+                entry->managed = false;
+                entry->managed_layers = 0;
+                update_mount_entry_layers(entry);
+                continue;
+            }
             pr_info("wipe_managed_umount_list: removing entry: %s\n", entry->umountable);
             free_mount_entry(entry);
         }
@@ -607,13 +622,23 @@ static int add_try_umount(void __user *arg)
 
         down_write(&mount_list_lock);
         list_for_each_entry (entry, &mount_list, list) {
-            if (!strcmp(entry->umountable, buf)) {
+            if (strcmp(entry->umountable, buf))
+                continue;
+            if (entry->unmanaged) {
                 pr_info("cmd_add_try_umount: %s is already here!\n", buf);
                 up_write(&mount_list_lock);
                 kfree(new_entry->umountable);
                 kfree(new_entry);
                 return -EEXIST;
             }
+            entry->unmanaged = true;
+            entry->flags = cmd.flags;
+            update_mount_entry_layers(entry);
+            up_write(&mount_list_lock);
+            kfree(new_entry->umountable);
+            kfree(new_entry);
+            pr_info("cmd_add_try_umount: %s merged with managed entry!\n", buf);
+            return 0;
         }
         if (mount_list_count >= KSU_MAX_UMOUNT_ENTRIES) {
             up_write(&mount_list_lock);
@@ -623,7 +648,9 @@ static int add_try_umount(void __user *arg)
         }
         new_entry->flags = cmd.flags;
         new_entry->layers = 1;
+        new_entry->managed_layers = 0;
         new_entry->managed = false;
+        new_entry->unmanaged = true;
         list_add(&new_entry->list, &mount_list);
         ++mount_list_count;
         up_write(&mount_list_lock);
@@ -639,12 +666,16 @@ static int add_try_umount(void __user *arg)
 
         down_write(&mount_list_lock);
         list_for_each_entry (entry, &mount_list, list) {
-            if (entry->managed && !strcmp(entry->umountable, buf)) {
-                entry->layers = cmd.flags;
-                up_write(&mount_list_lock);
-                pr_info("cmd_set_managed_umount: %s layers=%u\n", buf, cmd.flags);
-                return 0;
-            }
+            if (strcmp(entry->umountable, buf))
+                continue;
+            entry->managed = true;
+            entry->managed_layers = cmd.flags;
+            if (!entry->unmanaged)
+                entry->flags = 0;
+            update_mount_entry_layers(entry);
+            up_write(&mount_list_lock);
+            pr_info("cmd_set_managed_umount: %s layers=%u\n", buf, cmd.flags);
+            return 0;
         }
         if (mount_list_count >= KSU_MAX_UMOUNT_ENTRIES) {
             up_write(&mount_list_lock);
@@ -662,18 +693,24 @@ static int add_try_umount(void __user *arg)
         }
         new_entry->flags = 0;
         new_entry->layers = cmd.flags;
+        new_entry->managed_layers = cmd.flags;
         new_entry->managed = true;
+        new_entry->unmanaged = false;
 
         down_write(&mount_list_lock);
-        /* Another setter can race allocation; update it instead of duplicating. */
+        /* Another setter/add can race allocation; merge instead of duplicating. */
         list_for_each_entry (entry, &mount_list, list) {
-            if (entry->managed && !strcmp(entry->umountable, buf)) {
-                entry->layers = cmd.flags;
-                up_write(&mount_list_lock);
-                kfree(new_entry->umountable);
-                kfree(new_entry);
-                return 0;
-            }
+            if (strcmp(entry->umountable, buf))
+                continue;
+            entry->managed = true;
+            entry->managed_layers = cmd.flags;
+            if (!entry->unmanaged)
+                entry->flags = 0;
+            update_mount_entry_layers(entry);
+            up_write(&mount_list_lock);
+            kfree(new_entry->umountable);
+            kfree(new_entry);
+            return 0;
         }
         if (mount_list_count >= KSU_MAX_UMOUNT_ENTRIES) {
             up_write(&mount_list_lock);
@@ -694,11 +731,20 @@ static int add_try_umount(void __user *arg)
 
         down_write(&mount_list_lock);
         list_for_each_entry_safe (entry, tmp, &mount_list, list) {
-            if (!strcmp(entry->umountable, buf)) {
+            if (strcmp(entry->umountable, buf))
+                continue;
+            if (!entry->unmanaged)
+                break;
+            entry->unmanaged = false;
+            if (entry->managed) {
+                entry->flags = 0;
+                update_mount_entry_layers(entry);
+                pr_info("cmd_add_try_umount: manual ownership removed: %s\n", entry->umountable);
+            } else {
                 pr_info("cmd_add_try_umount: entry removed: %s\n", entry->umountable);
                 free_mount_entry(entry);
-                break;
             }
+            break;
         }
         up_write(&mount_list_lock);
         return 0;
