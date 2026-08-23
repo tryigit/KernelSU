@@ -125,6 +125,17 @@ fn io_errno(err: &anyhow::Error) -> Option<i32> {
         .and_then(std::io::Error::raw_os_error)
 }
 
+#[cfg(target_os = "android")]
+fn detach_unregistered_mount(mount: &str) -> Result<()> {
+    let mount = std::ffi::CString::new(mount).context("Module mount path contains NUL")?;
+    let ret = unsafe { libc::umount2(mount.as_ptr(), libc::MNT_DETACH) };
+    if ret != 0 {
+        return Err(std::io::Error::last_os_error())
+            .context("Failed to detach unregistered module mount");
+    }
+    Ok(())
+}
+
 fn register_module_mounts() -> Result<()> {
     let mountinfo = std::fs::read_to_string("/proc/self/mountinfo")
         .context("Failed to inspect module mounts")?;
@@ -173,19 +184,33 @@ fn register_module_mounts() -> Result<()> {
                 debug!("Module mount already registered: {mount}");
             }
             Err(err) => {
-                warn!("Failed to register module mount {mount}: {err:#}");
+                let registration_error =
+                    err.context(format!("Failed to register module mount {mount}"));
+                warn!("{registration_error:#}");
+
+                #[cfg(target_os = "android")]
+                if let Err(detach_err) = detach_unregistered_mount(mount) {
+                    warn!(
+                        "Failed to fail-close unregistered module mount {mount}: {detach_err:#}"
+                    );
+                    if first_error.is_none() {
+                        first_error = Some(registration_error.context(format!(
+                            "also failed to detach unprotected mount: {detach_err:#}"
+                        )));
+                    }
+                    continue;
+                }
+
                 if first_error.is_none() {
-                    first_error =
-                        Some(err.context(format!("Failed to register module mount {mount}")));
+                    first_error = Some(registration_error);
                 }
             }
         }
     }
 
-    // Real mounts remain installed even when one registration fails. Never
-    // roll back successful isolation entries, and always enable the kernel
-    // unmount path so every entry that did register still protects app
-    // namespaces.
+    // Keep every successfully registered mount protected. A mount that cannot
+    // be registered is detached above on Android rather than left visible to
+    // future app namespaces.
     ksucalls::report_module_mounted();
 
     if let Some(err) = first_error {
