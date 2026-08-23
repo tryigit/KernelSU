@@ -111,7 +111,7 @@ struct ksu_get_feature_cmd {
 };
 
 struct ksu_set_feature_cmd {
-    __u32 feature_id; /* Input: feature ID (enum ksu_feature_id) */
+    __u32 feature_id; /* Input: feature ID */
     __u64 value; /* Input: feature value/state to set */
 };
 
@@ -158,7 +158,7 @@ static const __u32 KSU_IOCTL_GET_INFO = _IOR('K', 2, struct ksu_get_info_cmd);
 static const __u32 KSU_IOCTL_GET_INFO_LEGACY = _IOC(_IOC_READ, 'K', 2, 0);
 static const __u32 KSU_IOCTL_REPORT_EVENT = _IOC(_IOC_WRITE, 'K', 3, 0);
 static const __u32 KSU_IOCTL_SET_SEPOLICY = _IOC(_IOC_READ | _IOC_WRITE, 'K', 4, 0);
-static const __u32 KSU_IOCTL_CHECK_SAFEMODE = _IOC(_IOC_WRITE, 'K', 5, 0);
+static const __u32 KSU_IOCTL_CHECK_SAFEMODE = _IOC(_IOC_READ, 'K', 5, 0);
 /* deprecated */
 static const __u32 KSU_IOCTL_GET_ALLOW_LIST = _IOC(_IOC_READ | _IOC_WRITE, 'K', 6, 0);
 /* deprecated */
