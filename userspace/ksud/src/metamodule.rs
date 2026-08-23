@@ -441,7 +441,8 @@ pub fn ensure_symlink(module_path: &Path) -> Result<()> {
 
     info!(
         "Creating metamodule symlink: {} -> {}",
-        symlink_path.display()
+        symlink_path.display(),
+        module_path.display()
     );
 
     // Remove existing symlink if it exists
