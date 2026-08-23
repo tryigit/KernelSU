@@ -353,10 +353,7 @@ pub fn umount_list_managed_set(path: &str, layers: u32) -> anyhow::Result<()> {
         flags: 0,
         mode: ksu_uapi::KSU_UMOUNT_DEL,
     };
-    ksuctl(
-        ksu_uapi::KSU_IOCTL_ADD_TRY_UMOUNT,
-        &raw mut remove_probe,
-    )?;
+    ksuctl(ksu_uapi::KSU_IOCTL_ADD_TRY_UMOUNT, &raw mut remove_probe)?;
 
     let mut cmd = ksu_uapi::ksu_add_try_umount_cmd {
         arg: c_path.as_ptr() as u64,
