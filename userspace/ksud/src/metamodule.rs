@@ -309,18 +309,22 @@ fn register_module_mounts_legacy(mounts: &[(String, u32)]) -> Result<()> {
 
 fn register_module_mounts() -> Result<()> {
     let initial_mounts = module_mount_layers(&read_mountinfo()?)?;
-    if initial_mounts.is_empty() {
-        return Ok(());
-    }
 
     match ksucalls::umount_list_managed_wipe() {
-        Ok(()) => {}
+        Ok(()) => {
+            if initial_mounts.is_empty() {
+                return Ok(());
+            }
+        }
         Err(err)
             if matches!(
                 err.raw_os_error(),
                 Some(libc::EINVAL) | Some(libc::ENOTTY)
             ) =>
         {
+            if initial_mounts.is_empty() {
+                return Ok(());
+            }
             debug!("Managed umount synchronization unavailable; using legacy registration");
             return register_module_mounts_legacy(&initial_mounts);
         }
