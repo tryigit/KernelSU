@@ -1,4 +1,4 @@
-use anyhow::{Context, Result, anyhow};
+use anyhow::{Context, Result, anyhow, ensure};
 use log::{info, warn};
 use std::fs;
 use std::os::fd::AsRawFd;
@@ -193,6 +193,11 @@ fn recover_after_delete_failure() -> Result<()> {
 }
 
 pub fn unload() -> Result<()> {
+    ensure!(
+        ksucalls::is_lkm(),
+        "KernelSU unload is only supported in LKM mode"
+    );
+
     info!("unload: starting KernelSU unload sequence");
 
     utils::switch_cgroups();
