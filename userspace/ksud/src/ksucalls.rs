@@ -313,12 +313,33 @@ pub fn umount_list_wipe() -> std::io::Result<()> {
     Ok(())
 }
 
+pub fn umount_list_managed_wipe() -> std::io::Result<()> {
+    let mut cmd = ksu_uapi::ksu_add_try_umount_cmd {
+        arg: 0,
+        flags: 0,
+        mode: ksu_uapi::KSU_UMOUNT_MANAGED_WIPE,
+    };
+    ksuctl(ksu_uapi::KSU_IOCTL_ADD_TRY_UMOUNT, &raw mut cmd)?;
+    Ok(())
+}
+
 pub fn umount_list_add(path: &str, flags: u32) -> anyhow::Result<()> {
     let c_path = std::ffi::CString::new(path)?;
     let mut cmd = ksu_uapi::ksu_add_try_umount_cmd {
         arg: c_path.as_ptr() as u64,
         flags,
         mode: ksu_uapi::KSU_UMOUNT_ADD,
+    };
+    ksuctl(ksu_uapi::KSU_IOCTL_ADD_TRY_UMOUNT, &raw mut cmd)?;
+    Ok(())
+}
+
+pub fn umount_list_managed_set(path: &str, layers: u32) -> anyhow::Result<()> {
+    let c_path = std::ffi::CString::new(path)?;
+    let mut cmd = ksu_uapi::ksu_add_try_umount_cmd {
+        arg: c_path.as_ptr() as u64,
+        flags: layers,
+        mode: ksu_uapi::KSU_UMOUNT_MANAGED_SET,
     };
     ksuctl(ksu_uapi::KSU_IOCTL_ADD_TRY_UMOUNT, &raw mut cmd)?;
     Ok(())
