@@ -294,7 +294,8 @@ fn register_module_mounts_legacy(mounts: &[(String, u32)]) -> Result<()> {
             Err(err) => {
                 warn!("Failed to register module mount {mount}: {err:#}");
                 if first_error.is_none() {
-                    first_error = Some(err.context(format!("Failed to register module mount {mount}")));
+                    first_error =
+                        Some(err.context(format!("Failed to register module mount {mount}")));
                 }
             }
         }
@@ -316,12 +317,7 @@ fn register_module_mounts() -> Result<()> {
                 return Ok(());
             }
         }
-        Err(err)
-            if matches!(
-                err.raw_os_error(),
-                Some(libc::EINVAL) | Some(libc::ENOTTY)
-            ) =>
-        {
+        Err(err) if matches!(err.raw_os_error(), Some(libc::EINVAL) | Some(libc::ENOTTY)) => {
             if initial_mounts.is_empty() {
                 return Ok(());
             }
@@ -349,11 +345,9 @@ fn register_module_mounts() -> Result<()> {
             if let Err(err) = ksucalls::umount_list_managed_set(mount, *layers) {
                 warn!("Failed to protect module mount {mount} ({layers} layers): {err:#}");
                 if first_error.is_none() {
-                    first_error = Some(
-                        err.context(format!(
-                            "Failed to protect module mount {mount} ({layers} layers)"
-                        )),
-                    );
+                    first_error = Some(err.context(format!(
+                        "Failed to protect module mount {mount} ({layers} layers)"
+                    )));
                 }
                 failed.push((mount.clone(), *layers));
             }
@@ -394,7 +388,9 @@ fn register_module_mounts() -> Result<()> {
         }
 
         ksucalls::report_module_mounted();
-        return Err(first_error.unwrap_or_else(|| anyhow!("Module mount isolation synchronization failed")));
+        return Err(
+            first_error.unwrap_or_else(|| anyhow!("Module mount isolation synchronization failed"))
+        );
     }
 }
 
@@ -445,8 +441,7 @@ pub fn ensure_symlink(module_path: &Path) -> Result<()> {
 
     info!(
         "Creating metamodule symlink: {} -> {}",
-        symlink_path.display(),
-        module_path.display()
+        symlink_path.display()
     );
 
     // Remove existing symlink if it exists
