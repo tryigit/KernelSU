@@ -730,6 +730,7 @@ void __exit ksu_ksud_exit()
     // TODO:
     // this should be done before unregister vfs_read_kp
     // stop_init_rc_hook();
+    cancel_work_sync(&stop_input_hook_work);
     unregister_kprobe(&input_event_kp);
 
     if (module_rc_buf) {
