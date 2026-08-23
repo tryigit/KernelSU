@@ -37,9 +37,6 @@ fn scan_driver_fd() -> Option<OwnedFd> {
                 if target_str.contains("[ksu_driver]")
                     && let Some(duplicated) = dup_fd_cloexec(fd_num)
                 {
-                    // Never create a second OwnedFd for the same raw descriptor.
-                    // The duplicate has independent ownership even if the
-                    // descriptor discovered through /proc closes concurrently.
                     return Some(duplicated);
                 }
             }
@@ -124,8 +121,6 @@ fn ksuctl_fd<T>(fd: RawFd, request: u32, arg: *mut T) -> std::io::Result<i32> {
 fn ksuctl<T>(request: u32, arg: *mut T) -> std::io::Result<i32> {
     use std::io;
 
-    // Keep the cache lock through ioctl so unload cannot take and close this
-    // descriptor while the syscall is using its raw fd number.
     let mut state = lock_driver_fd();
     if matches!(&*state, DriverFdState::TakenForUnload) {
         return Err(io::Error::from_raw_os_error(libc::EBUSY));
@@ -219,7 +214,6 @@ pub fn set_sepolicy(payload: *const u8, payload_len: u64) -> std::io::Result<i32
         data_len: payload_len,
         data: payload as u64,
     };
-
     ksuctl(ksu_uapi::KSU_IOCTL_SET_SEPOLICY, &raw mut ioctl_cmd)
 }
 
@@ -336,25 +330,6 @@ pub fn umount_list_add(path: &str, flags: u32) -> anyhow::Result<()> {
 
 pub fn umount_list_managed_set(path: &str, layers: u32) -> anyhow::Result<()> {
     let c_path = std::ffi::CString::new(path)?;
-
-    // MANAGED_WIPE runs before synchronization, so a legacy ADD collision here
-    // means the same path is owned by an unmanaged/manual entry. Never create a
-    // second entry for that path: its combined layer count could unmount past
-    // the KernelSU stack into the underlying system mount.
-    let mut probe = ksu_uapi::ksu_add_try_umount_cmd {
-        arg: c_path.as_ptr() as u64,
-        flags: 0,
-        mode: ksu_uapi::KSU_UMOUNT_ADD,
-    };
-    ksuctl(ksu_uapi::KSU_IOCTL_ADD_TRY_UMOUNT, &raw mut probe)?;
-
-    let mut remove_probe = ksu_uapi::ksu_add_try_umount_cmd {
-        arg: c_path.as_ptr() as u64,
-        flags: 0,
-        mode: ksu_uapi::KSU_UMOUNT_DEL,
-    };
-    ksuctl(ksu_uapi::KSU_IOCTL_ADD_TRY_UMOUNT, &raw mut remove_probe)?;
-
     let mut cmd = ksu_uapi::ksu_add_try_umount_cmd {
         arg: c_path.as_ptr() as u64,
         flags: layers,
