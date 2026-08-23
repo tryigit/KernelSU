@@ -336,6 +336,28 @@ pub fn umount_list_add(path: &str, flags: u32) -> anyhow::Result<()> {
 
 pub fn umount_list_managed_set(path: &str, layers: u32) -> anyhow::Result<()> {
     let c_path = std::ffi::CString::new(path)?;
+
+    // MANAGED_WIPE runs before synchronization, so a legacy ADD collision here
+    // means the same path is owned by an unmanaged/manual entry. Never create a
+    // second entry for that path: its combined layer count could unmount past
+    // the KernelSU stack into the underlying system mount.
+    let mut probe = ksu_uapi::ksu_add_try_umount_cmd {
+        arg: c_path.as_ptr() as u64,
+        flags: 0,
+        mode: ksu_uapi::KSU_UMOUNT_ADD,
+    };
+    ksuctl(ksu_uapi::KSU_IOCTL_ADD_TRY_UMOUNT, &raw mut probe)?;
+
+    let mut remove_probe = ksu_uapi::ksu_add_try_umount_cmd {
+        arg: c_path.as_ptr() as u64,
+        flags: 0,
+        mode: ksu_uapi::KSU_UMOUNT_DEL,
+    };
+    ksuctl(
+        ksu_uapi::KSU_IOCTL_ADD_TRY_UMOUNT,
+        &raw mut remove_probe,
+    )?;
+
     let mut cmd = ksu_uapi::ksu_add_try_umount_cmd {
         arg: c_path.as_ptr() as u64,
         flags: layers,
