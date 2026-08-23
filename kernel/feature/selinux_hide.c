@@ -438,6 +438,7 @@ static int ksu_selinux_hide_unhook(void)
         ksu_lsm_unhook(&selinux_setprocattr_hook);
         if (selinux_setprocattr_hook.entry) {
             ret = -EIO;
+            rollback_ret = -EUCLEAN;
             goto rollback;
         }
     }
