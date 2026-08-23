@@ -308,7 +308,7 @@ fn register_module_mounts_legacy(mounts: &[(String, u32)]) -> Result<()> {
     Ok(())
 }
 
-fn register_module_mounts() -> Result<()> {
+pub(crate) fn register_module_mounts() -> Result<()> {
     let initial_mounts = module_mount_layers(&read_mountinfo()?)?;
 
     match ksucalls::umount_list_managed_wipe() {
@@ -582,15 +582,26 @@ pub fn exec_mount_script(module_dir: &str) -> Result<()> {
         .status()?;
 
     // Inspect and register mounts even when the script failed so partial mounts
-    // do not silently escape app-namespace isolation. A successful script must
-    // also have a fully successful registration transaction.
+    // do not silently escape app-namespace isolation. If both the script and
+    // registration fail, preserve the registration failure because it carries
+    // the safety-critical isolation state.
     let registration = register_module_mounts();
 
-    ensure!(
-        result.success(),
-        "Metamodule mount script failed with status: {result:?}"
-    );
-    registration?;
+    match (result.success(), registration) {
+        (true, Ok(())) => {}
+        (true, Err(err)) => return Err(err),
+        (false, Ok(())) => {
+            ensure!(
+                false,
+                "Metamodule mount script failed with status: {result:?}"
+            );
+        }
+        (false, Err(err)) => {
+            return Err(err).context(format!(
+                "Metamodule mount script also failed with status: {result:?}"
+            ));
+        }
+    }
 
     info!("Metamodule mount script executed successfully");
     Ok(())
