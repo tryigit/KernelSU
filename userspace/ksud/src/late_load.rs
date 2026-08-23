@@ -1,4 +1,4 @@
-use anyhow::{Context, Result, anyhow, bail, ensure};
+use anyhow::{Context, Result, bail, ensure};
 use log::{info, warn};
 use rustix::cstr;
 use std::process::Command;
@@ -74,17 +74,14 @@ fn mount_metamodule_without_app_spawn(module_dir: &str) -> Result<()> {
     info!("late-load: stopping Android services before metamodule mount synchronization");
     stop_android_services_for_mount()?;
 
-    let mount_result = metamodule::exec_mount_script(module_dir);
-    let start_result = start_android_services();
-
-    match (mount_result, start_result) {
-        (Ok(()), Ok(())) => Ok(()),
-        (Err(mount_err), Ok(())) => Err(mount_err).context("metamodule mount synchronization failed"),
-        (Ok(()), Err(start_err)) => Err(start_err).context("failed to restart Android services after metamodule mount"),
-        (Err(mount_err), Err(start_err)) => Err(anyhow!(
-            "metamodule mount synchronization failed: {mount_err:#}; Android service restart also failed: {start_err:#}"
-        )),
+    if let Err(err) = metamodule::exec_mount_script(module_dir) {
+        warn!(
+            "late-load: metamodule mount synchronization failed; leaving Android services stopped"
+        );
+        return Err(err).context("metamodule mount synchronization failed");
     }
+
+    start_android_services().context("failed to restart Android services after metamodule mount")
 }
 
 pub fn run(package_name: &String, kmi: Option<String>, allow_shell: bool) -> Result<()> {
