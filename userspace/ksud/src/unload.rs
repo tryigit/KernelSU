@@ -233,7 +233,8 @@ pub fn unload() -> Result<()> {
     utils::switch_cgroups();
 
     info!("unload: stopping Android services...");
-    let stop_result = run_android_service_control("stop").and_then(|()| wait_for_zygote_services_stopped());
+    let stop_result =
+        run_android_service_control("stop").and_then(|()| wait_for_zygote_services_stopped());
     if let Err(stop_err) = stop_result {
         warn!("unload: Android stop failed, restoring service state...");
         if let Err(start_err) = run_android_service_control("start") {
