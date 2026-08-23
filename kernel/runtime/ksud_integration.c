@@ -12,6 +12,7 @@
 #include <linux/version.h>
 #include <linux/input-event-codes.h>
 #include <linux/kprobes.h>
+#include <linux/module.h>
 #include <linux/printk.h>
 #include <linux/types.h>
 #include <linux/uaccess.h>
@@ -185,6 +186,7 @@ void ksu_handle_execveat_ksud(const char *path, struct user_arg_ptr *argv)
 static ssize_t (*orig_read)(struct file *, char __user *, size_t, loff_t *);
 static ssize_t (*orig_read_iter)(struct kiocb *, struct iov_iter *);
 static struct file_operations fops_proxy;
+static const struct file_operations *orig_rc_fops;
 static ssize_t ksu_rc_pos = 0;
 const size_t ksu_rc_len = sizeof(KERNEL_SU_RC) - 1;
 
@@ -423,9 +425,25 @@ static bool is_init_rc(struct file *fp)
     return true;
 }
 
+static int ksu_rc_release_proxy(struct inode *inode, struct file *filp)
+{
+    const struct file_operations *orig = READ_ONCE(orig_rc_fops);
+    int ret = 0;
+
+    if (orig && orig->release)
+        ret = orig->release(inode, filp);
+    if (orig) {
+        WRITE_ONCE(orig_rc_fops, NULL);
+        fops_put(orig);
+    }
+    return ret;
+}
+
 static void ksu_install_rc_hook(struct file *file)
 {
     static bool rc_hooked = false;
+    const struct file_operations *new_fops;
+    const struct file_operations *orig_fops;
     int ret;
 
     if (!READ_ONCE(init_rc_hooks_ready) || !is_init_rc(file))
@@ -435,34 +453,44 @@ static void ksu_install_rc_hook(struct file *file)
     if (rc_hooked)
         return;
 
+    orig_fops = fops_get(file->f_op);
+    if (!orig_fops) {
+        pr_warn("failed to pin original init.rc fops\n");
+        return;
+    }
+
+    memcpy(&fops_proxy, orig_fops, sizeof(struct file_operations));
+    orig_read = orig_fops->read;
+    orig_read_iter = orig_fops->read_iter;
+    if (orig_read)
+        fops_proxy.read = read_proxy;
+    if (orig_read_iter)
+        fops_proxy.read_iter = read_iter_proxy;
+    fops_proxy.owner = THIS_MODULE;
+    fops_proxy.release = ksu_rc_release_proxy;
+
+    new_fops = fops_get(&fops_proxy);
+    if (!new_fops) {
+        fops_put(orig_fops);
+        pr_warn("failed to pin init.rc proxy fops\n");
+        return;
+    }
+
     ret = stop_init_rc_hook();
     if (ret) {
+        fops_put(new_fops);
+        fops_put(orig_fops);
         pr_err("failed to stop init_rc syscall hooks: %d\n", ret);
         return;
     }
-    rc_hooked = true;
-
-    // now we can sure that the init process is reading
-    // `/system/etc/init/init.rc`
 
     load_module_rc_once();
 
     pr_info("read init.rc, comm: %s, rc_count: %zu, module_rc: %zu\n", current->comm, ksu_rc_len, module_rc_len);
 
-    // Now we need to proxy the read and modify the result!
-    // But, we can not modify the file_operations directly, because it's in read-only memory.
-    // We just replace the whole file_operations with a proxy one.
-    memcpy(&fops_proxy, file->f_op, sizeof(struct file_operations));
-    orig_read = file->f_op->read;
-    if (orig_read) {
-        fops_proxy.read = read_proxy;
-    }
-    orig_read_iter = file->f_op->read_iter;
-    if (orig_read_iter) {
-        fops_proxy.read_iter = read_iter_proxy;
-    }
-    // replace the file_operations
-    file->f_op = &fops_proxy;
+    WRITE_ONCE(orig_rc_fops, orig_fops);
+    replace_fops(file, new_fops);
+    rc_hooked = true;
 }
 
 static void ksu_handle_sys_read(unsigned int fd, char __user **buf_ptr, size_t *count_ptr)
