@@ -168,7 +168,7 @@ static ssize_t my_write_access(struct file *file, char *buf, size_t size)
     length = security_context_str_to_sid(&fake_state, scon, &ssid, GFP_KERNEL);
     if (length)
         goto out;
-    length = security_context_str_to_sid(&fake_state, tcon, strlen(tcon), &tsid, GFP_KERNEL);
+    length = security_context_str_to_sid(&fake_state, tcon, &tsid, GFP_KERNEL);
     if (length)
         goto out;
     security_compute_av_user(&fake_state, ssid, tsid, tclass, &avd);
