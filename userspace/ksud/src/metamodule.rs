@@ -4,10 +4,10 @@
 //! Metamodules are special modules that manage how regular modules are mounted
 //! and provide hooks for module installation/uninstallation.
 
-use anyhow::{Context, Result, ensure};
+use anyhow::{Context, Result, anyhow, ensure};
 use log::{debug, info, warn};
 use std::{
-    collections::HashMap,
+    collections::{HashMap, HashSet},
     path::{Path, PathBuf},
     process::Command,
 };
@@ -125,114 +125,273 @@ fn io_errno(err: &anyhow::Error) -> Option<i32> {
         .and_then(std::io::Error::raw_os_error)
 }
 
-#[cfg(target_os = "android")]
-fn detach_unregistered_mount(mount: &str) -> Result<()> {
-    ensure!(mount != "/", "Refusing to detach the root mount");
-    let mount = std::ffi::CString::new(mount).context("Module mount path contains NUL")?;
-    let ret = unsafe { libc::umount2(mount.as_ptr(), libc::MNT_DETACH) };
-    if ret != 0 {
-        return Err(std::io::Error::last_os_error())
-            .context("Failed to detach unregistered module mount");
-    }
-    Ok(())
+#[derive(Debug)]
+struct MountInfoEntry {
+    id: u64,
+    parent_id: u64,
+    root: String,
+    target: String,
+    source: String,
 }
 
-fn register_module_mounts() -> Result<()> {
+fn read_mountinfo() -> Result<Vec<MountInfoEntry>> {
     let mountinfo = std::fs::read_to_string("/proc/self/mountinfo")
         .context("Failed to inspect module mounts")?;
-    let mut mounts = Vec::new();
+    let mut entries = Vec::new();
 
     for line in mountinfo.lines() {
         let Some((left, right)) = line.split_once(" - ") else {
             continue;
         };
         let mut left = left.split_ascii_whitespace();
-        let Some(root) = left.nth(3) else {
+        let Some(id) = left.next().and_then(|s| s.parse::<u64>().ok()) else {
+            continue;
+        };
+        let Some(parent_id) = left.next().and_then(|s| s.parse::<u64>().ok()) else {
+            continue;
+        };
+        if left.next().is_none() {
+            continue;
+        }
+        let Some(root) = left.next() else {
             continue;
         };
         let Some(target) = left.next() else {
             continue;
         };
+
         let mut right = right.split_ascii_whitespace();
-        right.next();
+        if right.next().is_none() {
+            continue;
+        }
         let Some(source) = right.next() else {
             continue;
         };
 
-        let root = unescape_mountinfo_field(root);
-        if source != "KSU" && !is_module_mount_root(&root) {
-            continue;
-        }
-        mounts.push(unescape_mountinfo_field(target));
+        entries.push(MountInfoEntry {
+            id,
+            parent_id,
+            root: unescape_mountinfo_field(root),
+            target: unescape_mountinfo_field(target),
+            source: unescape_mountinfo_field(source),
+        });
     }
 
-    mounts.sort_by(|a, b| {
+    Ok(entries)
+}
+
+fn is_module_mount(entry: &MountInfoEntry) -> bool {
+    entry.source == "KSU" || is_module_mount_root(&entry.root)
+}
+
+fn top_entry_for_target<'a>(
+    entries: &'a [MountInfoEntry],
+    target: &str,
+) -> Result<Option<&'a MountInfoEntry>> {
+    let target_entries = entries
+        .iter()
+        .filter(|entry| entry.target == target)
+        .collect::<Vec<_>>();
+    if target_entries.is_empty() {
+        return Ok(None);
+    }
+
+    let parent_ids = target_entries
+        .iter()
+        .map(|entry| entry.parent_id)
+        .collect::<HashSet<_>>();
+    let tops = target_entries
+        .into_iter()
+        .filter(|entry| !parent_ids.contains(&entry.id))
+        .collect::<Vec<_>>();
+
+    if tops.len() != 1 {
+        return Err(anyhow!(
+            "Ambiguous mount stack for {target}: found {} top candidates",
+            tops.len()
+        ));
+    }
+    Ok(tops.into_iter().next())
+}
+
+fn module_mount_layers(entries: &[MountInfoEntry]) -> Result<Vec<(String, u32)>> {
+    let module_targets = entries
+        .iter()
+        .filter(|entry| is_module_mount(entry))
+        .map(|entry| entry.target.clone())
+        .collect::<HashSet<_>>();
+    let by_id = entries
+        .iter()
+        .map(|entry| (entry.id, entry))
+        .collect::<HashMap<_, _>>();
+    let mut mounts = Vec::new();
+
+    for target in module_targets {
+        let Some(mut current) = top_entry_for_target(entries, &target)? else {
+            continue;
+        };
+        let mut layers = 0u32;
+
+        while current.target == target && is_module_mount(current) {
+            layers = layers
+                .checked_add(1)
+                .ok_or_else(|| anyhow!("Too many mount layers for {target}"))?;
+            let Some(parent) = by_id.get(&current.parent_id).copied() else {
+                break;
+            };
+            if parent.target != target {
+                break;
+            }
+            current = parent;
+        }
+
+        if layers == 0 {
+            warn!(
+                "Module mount exists below a foreign top layer at {target}; refusing path-based isolation for this target"
+            );
+            continue;
+        }
+        mounts.push((target, layers));
+    }
+
+    mounts.sort_by(|(a, _), (b, _)| {
         let a_depth = a.bytes().filter(|ch| *ch == b'/').count();
         let b_depth = b.bytes().filter(|ch| *ch == b'/').count();
         a_depth.cmp(&b_depth).then_with(|| a.cmp(b))
     });
-    mounts.dedup();
+    Ok(mounts)
+}
 
-    if mounts.is_empty() {
-        return Ok(());
+#[cfg(target_os = "android")]
+fn detach_top_module_mount(target: &str) -> Result<bool> {
+    ensure!(target != "/", "Refusing to detach the root mount");
+    let entries = read_mountinfo()?;
+    let Some(top) = top_entry_for_target(&entries, target)? else {
+        return Ok(false);
+    };
+    if !is_module_mount(top) {
+        return Ok(false);
     }
 
+    let target = std::ffi::CString::new(target).context("Module mount path contains NUL")?;
+    let ret = unsafe { libc::umount2(target.as_ptr(), libc::MNT_DETACH) };
+    if ret != 0 {
+        return Err(std::io::Error::last_os_error())
+            .context("Failed to detach unregistered module mount");
+    }
+    Ok(true)
+}
+
+fn register_module_mounts_legacy(mounts: &[(String, u32)]) -> Result<()> {
     let mut first_error = None;
-    let mut failed_mounts = Vec::new();
-    for mount in &mounts {
+
+    for (mount, _) in mounts {
         match ksucalls::umount_list_add(mount, 0) {
             Ok(()) => {}
             Err(err) if io_errno(&err) == Some(libc::EEXIST) => {
                 debug!("Module mount already registered: {mount}");
             }
             Err(err) => {
-                let registration_error =
-                    err.context(format!("Failed to register module mount {mount}"));
-                warn!("{registration_error:#}");
-                failed_mounts.push(mount.clone());
+                warn!("Failed to register module mount {mount}: {err:#}");
                 if first_error.is_none() {
-                    first_error = Some(registration_error);
+                    first_error = Some(err.context(format!("Failed to register module mount {mount}")));
                 }
             }
         }
     }
 
-    #[cfg(target_os = "android")]
-    {
-        let mut detached_roots = Vec::new();
-        for mount in failed_mounts.iter().rev() {
-            match detach_unregistered_mount(mount) {
-                Ok(()) => detached_roots.push(mount.as_str()),
-                Err(detach_err) => warn!(
-                    "Failed to fail-close unregistered module mount {mount}: {detach_err:#}"
-                ),
-            }
-        }
-
-        if !detached_roots.is_empty() {
-            for mount in &mounts {
-                if detached_roots
-                    .iter()
-                    .any(|root| path_is_at_or_under(mount, root))
-                    && let Err(cleanup_err) = ksucalls::umount_list_del(mount)
-                {
-                    warn!(
-                        "Failed to remove stale isolation entry {mount} after mount detach: {cleanup_err:#}"
-                    );
-                }
-            }
-        }
-    }
-
-    // Keep every successfully registered mount protected. If a failed parent
-    // is detached, remove descendant entries too because lazy unmount detaches
-    // that subtree and those paths must not later target an underlying mount.
     ksucalls::report_module_mounted();
-
     if let Some(err) = first_error {
         return Err(err);
     }
     Ok(())
+}
+
+fn register_module_mounts() -> Result<()> {
+    let initial_mounts = module_mount_layers(&read_mountinfo()?)?;
+    if initial_mounts.is_empty() {
+        return Ok(());
+    }
+
+    match ksucalls::umount_list_managed_wipe() {
+        Ok(()) => {}
+        Err(err)
+            if matches!(
+                err.raw_os_error(),
+                Some(libc::EINVAL) | Some(libc::ENOTTY)
+            ) =>
+        {
+            debug!("Managed umount synchronization unavailable; using legacy registration");
+            return register_module_mounts_legacy(&initial_mounts);
+        }
+        Err(err) => return Err(err).context("Failed to reset managed module mount isolation"),
+    }
+
+    let mut first_error = None;
+    loop {
+        let mounts = module_mount_layers(&read_mountinfo()?)?;
+        ksucalls::umount_list_managed_wipe()
+            .context("Failed to reset managed module mount isolation")?;
+
+        if mounts.is_empty() {
+            if let Some(err) = first_error {
+                return Err(err);
+            }
+            return Ok(());
+        }
+
+        let mut failed = Vec::new();
+        for (mount, layers) in &mounts {
+            if let Err(err) = ksucalls::umount_list_managed_set(mount, *layers) {
+                warn!("Failed to protect module mount {mount} ({layers} layers): {err:#}");
+                if first_error.is_none() {
+                    first_error = Some(
+                        err.context(format!(
+                            "Failed to protect module mount {mount} ({layers} layers)"
+                        )),
+                    );
+                }
+                failed.push((mount.clone(), *layers));
+            }
+        }
+
+        if failed.is_empty() {
+            ksucalls::report_module_mounted();
+            if let Some(err) = first_error {
+                return Err(err);
+            }
+            return Ok(());
+        }
+
+        #[cfg(target_os = "android")]
+        {
+            let mut detached_any = false;
+            for (mount, layers) in failed.iter().rev() {
+                let mut detached = 0u32;
+                while detached < *layers {
+                    match detach_top_module_mount(mount) {
+                        Ok(true) => {
+                            detached += 1;
+                            detached_any = true;
+                        }
+                        Ok(false) => break,
+                        Err(err) => {
+                            warn!(
+                                "Failed to fail-close module mount {mount} after registration failure: {err:#}"
+                            );
+                            break;
+                        }
+                    }
+                }
+            }
+            if detached_any {
+                continue;
+            }
+        }
+
+        ksucalls::report_module_mounted();
+        return Err(first_error.unwrap_or_else(|| anyhow!("Module mount isolation synchronization failed")));
+    }
 }
 
 /// Check if it's safe to install a regular module
