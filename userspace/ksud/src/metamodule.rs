@@ -308,7 +308,7 @@ fn register_module_mounts_legacy(mounts: &[(String, u32)]) -> Result<()> {
     Ok(())
 }
 
-pub(crate) fn register_module_mounts() -> Result<()> {
+pub fn register_module_mounts() -> Result<()> {
     let initial_mounts = module_mount_layers(&read_mountinfo()?)?;
 
     match ksucalls::umount_list_managed_wipe() {
