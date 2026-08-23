@@ -11,6 +11,8 @@ use crate::{ksucalls, utils};
 const PREPARE_UNLOAD_RETRIES: usize = 20;
 const DELETE_MODULE_RETRIES: usize = 20;
 const UNLOAD_RETRY_DELAY: Duration = Duration::from_millis(50);
+const ZYGOTE_STOP_RETRIES: usize = 100;
+const ZYGOTE_STOP_RETRY_DELAY: Duration = Duration::from_millis(50);
 
 fn find_su_domain_pids() -> Vec<i32> {
     let my_pid = std::process::id() as i32;
@@ -132,6 +134,26 @@ fn run_android_service_control(command: &str) -> Result<()> {
     Ok(())
 }
 
+fn zygote_services_stopped() -> bool {
+    matches!(
+        utils::getprop("init.svc.zygote").as_deref(),
+        Some("stopped")
+    ) && utils::getprop("init.svc.zygote_secondary").is_none_or(|state| state == "stopped")
+}
+
+fn wait_for_zygote_services_stopped() -> Result<()> {
+    for _ in 0..ZYGOTE_STOP_RETRIES {
+        if zygote_services_stopped() {
+            return Ok(());
+        }
+        thread::sleep(ZYGOTE_STOP_RETRY_DELAY);
+    }
+
+    Err(anyhow!(
+        "zygote services did not stop before KernelSU unload teardown"
+    ))
+}
+
 fn prepare_unload_with_retry(fd: i32) -> std::io::Result<()> {
     for attempt in 0..PREPARE_UNLOAD_RETRIES {
         match ksucalls::prepare_unload_on(fd) {
@@ -211,7 +233,8 @@ pub fn unload() -> Result<()> {
     utils::switch_cgroups();
 
     info!("unload: stopping Android services...");
-    if let Err(stop_err) = run_android_service_control("stop") {
+    let stop_result = run_android_service_control("stop").and_then(|()| wait_for_zygote_services_stopped());
+    if let Err(stop_err) = stop_result {
         warn!("unload: Android stop failed, restoring service state...");
         if let Err(start_err) = run_android_service_control("start") {
             return Err(stop_err.context(format!(
