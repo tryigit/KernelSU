@@ -276,6 +276,7 @@ static void ksu_refresh_sys_enter_marks(void)
 #ifdef CONFIG_KRETPROBES
 struct ksu_tracepoint_mutation_ctx {
     bool target;
+    bool add;
 };
 
 static bool ksu_tracepoint_mutation_is_external(struct pt_regs *regs)
@@ -289,23 +290,21 @@ static bool ksu_tracepoint_mutation_is_external(struct pt_regs *regs)
     return !func || READ_ONCE(func->func) != (void *)ksu_sys_enter_handler;
 }
 
-static int ksu_tracepoint_add_pre(struct kprobe *p, struct pt_regs *regs)
+static int ksu_tracepoint_add_entry(struct kretprobe_instance *ri, struct pt_regs *regs)
 {
-    if (!ksu_tracepoint_mutation_is_external(regs))
-        return 0;
+    struct ksu_tracepoint_mutation_ctx *ctx = (struct ksu_tracepoint_mutation_ctx *)ri->data;
 
-    /*
-     * Use a plain entry kprobe for additions. A kretprobe entry handler is
-     * skipped entirely when its maxactive instance pool is exhausted; missing
-     * a 1->2 transition would let an external perf/ftrace/eBPF consumer run
-     * with selective task marks and lose syscalls. A plain kprobe has no
-     * return-instance pool, so we fail safe by marking globally before the
-     * new callback can become visible. If the add later fails, staying global
-     * is a performance cost only and the next successful removal/refresh can
-     * restore selective marks.
-     */
-    WRITE_ONCE(syscall_tracepoint_shared, true);
-    ksu_mark_all_process();
+    ctx->target = ksu_tracepoint_mutation_is_external(regs);
+    ctx->add = true;
+    if (ctx->target) {
+        /*
+         * tracepoint_add_func() has not activated the new callback yet. Mark
+         * every task now so no external perf/ftrace/eBPF consumer can miss a
+         * syscall in the 1->2 transition window.
+         */
+        WRITE_ONCE(syscall_tracepoint_shared, true);
+        ksu_mark_all_process();
+    }
     return 0;
 }
 
@@ -314,26 +313,39 @@ static int ksu_tracepoint_remove_entry(struct kretprobe_instance *ri, struct pt_
     struct ksu_tracepoint_mutation_ctx *ctx = (struct ksu_tracepoint_mutation_ctx *)ri->data;
 
     ctx->target = ksu_tracepoint_mutation_is_external(regs);
+    ctx->add = false;
     return 0;
 }
 
-static int ksu_tracepoint_remove_ret(struct kretprobe_instance *ri, struct pt_regs *regs)
+static int ksu_tracepoint_mutation_ret(struct kretprobe_instance *ri, struct pt_regs *regs)
 {
     struct ksu_tracepoint_mutation_ctx *ctx = (struct ksu_tracepoint_mutation_ctx *)ri->data;
+    long ret = (long)PT_REGS_RC(regs);
 
-    if (ctx->target)
+    if (!ctx->target)
+        return 0;
+
+    /*
+     * Failed additions need their speculative global marks undone. Successful
+     * removals may have left KernelSU as the sole consumer. Re-read the actual
+     * callback array instead of inferring consumer count from regfunc calls.
+     */
+    if (ret || !ctx->add)
         ksu_refresh_sys_enter_marks();
     return 0;
 }
 
-static struct kprobe tracepoint_add_kp = {
-    .symbol_name = "tracepoint_add_func",
-    .pre_handler = ksu_tracepoint_add_pre,
+static struct kretprobe tracepoint_add_rp = {
+    .kp.symbol_name = "tracepoint_add_func",
+    .handler = ksu_tracepoint_mutation_ret,
+    .entry_handler = ksu_tracepoint_add_entry,
+    .data_size = sizeof(struct ksu_tracepoint_mutation_ctx),
+    .maxactive = 32,
 };
 
 static struct kretprobe tracepoint_remove_rp = {
     .kp.symbol_name = "tracepoint_remove_func",
-    .handler = ksu_tracepoint_remove_ret,
+    .handler = ksu_tracepoint_mutation_ret,
     .entry_handler = ksu_tracepoint_remove_entry,
     .data_size = sizeof(struct ksu_tracepoint_mutation_ctx),
     .maxactive = 32,
@@ -345,7 +357,7 @@ static bool ksu_tracepoint_observer_init(void)
 {
     int ret;
 
-    ret = register_kprobe(&tracepoint_add_kp);
+    ret = register_kretprobe(&tracepoint_add_rp);
     if (ret) {
         pr_warn("hook_manager: tracepoint_add_func observer unavailable: %d\n", ret);
         return false;
@@ -354,7 +366,7 @@ static bool ksu_tracepoint_observer_init(void)
     ret = register_kretprobe(&tracepoint_remove_rp);
     if (ret) {
         pr_warn("hook_manager: tracepoint_remove_func observer unavailable: %d\n", ret);
-        unregister_kprobe(&tracepoint_add_kp);
+        unregister_kretprobe(&tracepoint_add_rp);
         return false;
     }
 
@@ -368,7 +380,7 @@ static void ksu_tracepoint_observer_exit(void)
         return;
 
     unregister_kretprobe(&tracepoint_remove_rp);
-    unregister_kprobe(&tracepoint_add_kp);
+    unregister_kretprobe(&tracepoint_add_rp);
     tracepoint_observer_registered = false;
 }
 #else
