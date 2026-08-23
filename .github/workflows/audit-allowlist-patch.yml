@@ -1,0 +1,71 @@
+name: Audit allowlist unload pin patch
+
+on:
+  push:
+    branches:
+      - test/pr3650-rescan-allowlist-patchwork
+
+permissions:
+  contents: write
+
+jobs:
+  patch:
+    if: github.event.head_commit.message == 'audit: install allowlist patch worker'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: test/pr3650-rescan-allowlist-patchwork
+      - name: Pin module across allowlist task_work
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+          p = Path('kernel/policy/allowlist.c')
+          s = p.read_text()
+
+          old = '#include <linux/mutex.h>\n#include <linux/task_work.h>'
+          new = '#include <linux/mutex.h>\n#include <linux/module.h>\n#include <linux/task_work.h>'
+          assert old in s
+          s = s.replace(old, new, 1)
+
+          old = '''out:
+              revert_creds(saved);
+              kfree(_cb);
+          }'''
+          new = '''out:
+              revert_creds(saved);
+              kfree(_cb);
+              module_put(THIS_MODULE);
+          }'''
+          assert old in s
+          s = s.replace(old, new, 1)
+
+          old = '''    cb->func = do_persistent_allow_list;
+              if (task_work_add(tsk, cb, TWA_RESUME)) {
+                  kfree(cb);
+                  pr_warn("save_allow_list add task_work failed\\n");
+              }'''
+          new = '''    cb->func = do_persistent_allow_list;
+              if (!try_module_get(THIS_MODULE)) {
+                  kfree(cb);
+                  pr_warn("save_allow_list cannot pin unloading module\\n");
+                  goto put_task;
+              }
+              if (task_work_add(tsk, cb, TWA_RESUME)) {
+                  module_put(THIS_MODULE);
+                  kfree(cb);
+                  pr_warn("save_allow_list add task_work failed\\n");
+              }'''
+          assert old in s
+          s = s.replace(old, new, 1)
+          p.write_text(s)
+          PY
+          clang-format -i kernel/policy/allowlist.c || true
+          git diff --check
+      - name: Commit patch
+        run: |
+          git config user.name github-actions[bot]
+          git config user.email 41898282+github-actions[bot]@users.noreply.github.com
+          git add kernel/policy/allowlist.c
+          git commit -m 'fix: pin module across allowlist task work'
+          git push origin HEAD:test/pr3650-rescan-allowlist-patchwork
