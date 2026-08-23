@@ -66,7 +66,10 @@ fn start_android_services() -> Result<()> {
     let status = Command::new("start")
         .status()
         .context("failed to execute Android start command")?;
-    ensure!(status.success(), "Android start exited with status {status}");
+    ensure!(
+        status.success(),
+        "Android start exited with status {status}"
+    );
     Ok(())
 }
 
