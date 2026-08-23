@@ -111,7 +111,7 @@ struct ksu_get_feature_cmd {
 };
 
 struct ksu_set_feature_cmd {
-    __u32 feature_id; /* Input: feature ID */
+    __u32 feature_id; /* Input: feature ID (enum ksu_feature_id) */
     __u64 value; /* Input: feature value/state to set */
 };
 
