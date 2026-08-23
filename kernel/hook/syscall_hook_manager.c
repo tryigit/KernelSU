@@ -514,7 +514,7 @@ int ksu_prepare_module_unload(void)
         rollback_ret = ksu_syscall_hook_abort_exit();
         if (rollback_ret)
             pr_err("hook_manager: syscall rollback after SELinux prepare failure failed: %d\n", rollback_ret);
-        WRITE_ONCE(unload_state, KSU_UNLOAD_FAILED);
+        WRITE_ONCE(unload_state, rollback_ret || ret == -EUCLEAN ? KSU_UNLOAD_FAILED : KSU_UNLOAD_RUNNING);
         pr_err("hook_manager: SELinux patch restore failed: %d\n", ret);
         mutex_unlock(&unload_state_lock);
         return rollback_ret ? -EUCLEAN : ret;
