@@ -160,7 +160,7 @@ fn commit_unload_with_retry(fd: i32) -> std::io::Result<()> {
 
 fn delete_module_with_retry() -> Result<()> {
     for attempt in 0..DELETE_MODULE_RETRIES {
-        match rustix::system::delete_module(c"kernelsu", 0) {
+        match rustix::system::delete_module(c"kernelsu", libc::O_NONBLOCK) {
             Ok(()) => return Ok(()),
             Err(err)
                 if (err == rustix::io::Errno::AGAIN || err == rustix::io::Errno::BUSY)
