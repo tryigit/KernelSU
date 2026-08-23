@@ -154,6 +154,9 @@ pub fn run(package_name: &String, kmi: Option<String>, allow_shell: bool) -> Res
         dump_process_info("after load_module");
     }
 
+    crate::ksucalls::ensure_uapi_version_matched()
+        .context("KernelSU UAPI mismatch after late load")?;
+
     // We need to reset stdin/stdout/stderr; otherwise, sending file descriptors via cmd transactions
     // will be blocked by SELinux because its fsec->sid is still u:r:su:s0 instead of u:r:ksu:s0.
     utils::reset_std()?;
