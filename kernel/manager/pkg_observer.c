@@ -48,8 +48,14 @@ static int ksu_handle_inode_event(struct fsnotify_mark *mark, u32 mask, struct i
     return 0;
 }
 
+static void ksu_free_mark(struct fsnotify_mark *mark)
+{
+    kfree(mark);
+}
+
 static const struct fsnotify_ops ksu_ops = {
     .handle_inode_event = ksu_handle_inode_event,
+    .free_mark = ksu_free_mark,
 };
 
 static int add_mark_on_inode(struct inode *inode, u32 mask, struct fsnotify_mark **out)
@@ -137,6 +143,12 @@ int ksu_observer_init(void)
 
     ret = watch_one_dir(&g_watch);
     if (ret) {
+        /*
+         * A failed mark attachment can still queue the mark for deferred
+         * SRCU destruction. Drain it before dropping the final group ref so
+         * no delayed fsnotify callback can retain ksu_ops module text.
+         */
+        fsnotify_wait_marks_destroyed();
         fsnotify_put_group(g);
         g = NULL;
         mutex_unlock(&observer_lock);
@@ -159,6 +171,13 @@ void __exit ksu_observer_exit(void)
 
     WRITE_ONCE(observer_initialized, false);
     unwatch_one_dir(&g_watch);
+    /*
+     * fsnotify mark destruction is deferred until after an SRCU grace
+     * period. Wait for that reaper here while the module is still alive;
+     * after this returns there can be no outstanding event callback using
+     * ksu_ops or ksu_handle_inode_event().
+     */
+    fsnotify_wait_marks_destroyed();
     fsnotify_put_group(g);
     g = NULL;
     mutex_unlock(&observer_lock);
