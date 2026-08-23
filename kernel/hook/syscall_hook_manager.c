@@ -578,7 +578,7 @@ int ksu_abort_module_unload(void)
 
     ret = ksu_selinux_hide_abort_unload();
     if (ret) {
-        WRITE_ONCE(unload_state, KSU_UNLOAD_FAILED);
+        WRITE_ONCE(unload_state, ret == -EUCLEAN ? KSU_UNLOAD_FAILED : KSU_UNLOAD_PREPARED);
         pr_err("hook_manager: SELinux patch re-arm failed: %d\n", ret);
         mutex_unlock(&unload_state_lock);
         return ret;
