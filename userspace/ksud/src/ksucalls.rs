@@ -37,6 +37,9 @@ fn scan_driver_fd() -> Option<OwnedFd> {
                 if target_str.contains("[ksu_driver]")
                     && let Some(duplicated) = dup_fd_cloexec(fd_num)
                 {
+                    // Never create a second OwnedFd for the same raw descriptor.
+                    // The duplicate has independent ownership even if the
+                    // descriptor discovered through /proc closes concurrently.
                     return Some(duplicated);
                 }
             }
@@ -121,6 +124,8 @@ fn ksuctl_fd<T>(fd: RawFd, request: u32, arg: *mut T) -> std::io::Result<i32> {
 fn ksuctl<T>(request: u32, arg: *mut T) -> std::io::Result<i32> {
     use std::io;
 
+    // Keep the cache lock through ioctl so unload cannot take and close this
+    // descriptor while the syscall is using its raw fd number.
     let mut state = lock_driver_fd();
     if matches!(&*state, DriverFdState::TakenForUnload) {
         return Err(io::Error::from_raw_os_error(libc::EBUSY));
@@ -214,6 +219,7 @@ pub fn set_sepolicy(payload: *const u8, payload_len: u64) -> std::io::Result<i32
         data_len: payload_len,
         data: payload as u64,
     };
+
     ksuctl(ksu_uapi::KSU_IOCTL_SET_SEPOLICY, &raw mut ioctl_cmd)
 }
 
