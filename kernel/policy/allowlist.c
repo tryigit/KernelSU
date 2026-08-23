@@ -2,6 +2,7 @@
 #include <linux/limits.h>
 #include <linux/rculist.h>
 #include <linux/mutex.h>
+#include <linux/module.h>
 #include <linux/task_work.h>
 #include <linux/capability.h>
 #include <linux/compiler.h>
@@ -443,7 +444,10 @@ static void do_persistent_allow_list(struct callback_head *_cb)
         pr_info("save allow list, name: %s uid :%d, allow: %d\n", p->profile.key, p->profile.curr_uid,
                 p->profile.allow_su);
 
-        kernel_write(fp, &p->profile, sizeof(p->profile), &off);
+        if (kernel_write(fp, &p->profile, sizeof(p->profile), &off) != sizeof(p->profile)) {
+            pr_err("save_allow_list write profile failed: %s\n", p->profile.key);
+            break;
+        }
     }
     mutex_unlock(&allowlist_mutex);
 
@@ -452,6 +456,7 @@ close_file:
 out:
     revert_creds(saved);
     kfree(_cb);
+    module_put(THIS_MODULE);
 }
 
 void ksu_persistent_allow_list()
@@ -473,7 +478,13 @@ void ksu_persistent_allow_list()
         goto put_task;
     }
     cb->func = do_persistent_allow_list;
+    if (!try_module_get(THIS_MODULE)) {
+        kfree(cb);
+        pr_warn("save_allow_list cannot pin unloading module\n");
+        goto put_task;
+    }
     if (task_work_add(tsk, cb, TWA_RESUME)) {
+        module_put(THIS_MODULE);
         kfree(cb);
         pr_warn("save_allow_list add task_work failed\n");
     }
@@ -551,7 +562,7 @@ void ksu_load_allow_list()
     app_profile_size = version < KSU_APP_PROFILE_VER ? kAppProfileSizePreV4 : sizeof(struct app_profile);
 
     while (true) {
-        struct app_profile profile;
+        struct app_profile profile = { 0 };
 
         ret = kernel_read(fp, &profile, app_profile_size, &off);
 
