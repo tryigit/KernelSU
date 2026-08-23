@@ -124,6 +124,14 @@ fn close_ksu_fds_except(keep_fd: Option<i32>) {
     }
 }
 
+fn run_android_service_control(command: &str) -> Result<()> {
+    let status = Command::new(command)
+        .status()
+        .with_context(|| format!("failed to execute Android {command}"))?;
+    ensure!(status.success(), "Android {command} exited with {status}");
+    Ok(())
+}
+
 fn prepare_unload_with_retry(fd: i32) -> std::io::Result<()> {
     for attempt in 0..PREPARE_UNLOAD_RETRIES {
         match ksucalls::prepare_unload_on(fd) {
@@ -203,7 +211,15 @@ pub fn unload() -> Result<()> {
     utils::switch_cgroups();
 
     info!("unload: stopping Android services...");
-    let _ = Command::new("stop").status();
+    if let Err(stop_err) = run_android_service_control("stop") {
+        warn!("unload: Android stop failed, restoring service state...");
+        if let Err(start_err) = run_android_service_control("start") {
+            return Err(stop_err.context(format!(
+                "Android service stop failed and recovery start also failed: {start_err:#}"
+            )));
+        }
+        return Err(stop_err).context("Android service stop failed; teardown not started");
+    }
 
     let mut hooks_prepared = false;
     let mut runtime_recovered = false;
@@ -290,13 +306,23 @@ pub fn unload() -> Result<()> {
 
     let restart_safe =
         result.is_ok() || runtime_recovered || (!hooks_prepared && !unsafe_prepare_failure);
-    if restart_safe {
+    let restart_result = if restart_safe {
         info!("unload: restarting Android services...");
-        let _ = Command::new("start").status();
+        Some(run_android_service_control("start"))
     } else {
         warn!(
             "unload: kernel teardown did not reach a safe running state; leaving Android services stopped"
         );
+        None
+    };
+
+    if let Some(Err(restart_err)) = restart_result {
+        return match result {
+            Ok(()) => Err(restart_err.context("KernelSU unloaded but Android service restart failed")),
+            Err(unload_err) => Err(unload_err.context(format!(
+                "Android service restart also failed: {restart_err:#}"
+            ))),
+        };
     }
 
     result?;
