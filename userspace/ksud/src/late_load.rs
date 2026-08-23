@@ -41,16 +41,24 @@ fn dump_process_info(label: &str) {
 }
 
 fn zygote_services_stopped() -> bool {
-    ["init.svc.zygote", "init.svc.zygote_secondary"]
-        .iter()
-        .all(|name| utils::getprop(name).is_none_or(|state| state == "stopped"))
+    matches!(
+        utils::getprop("init.svc.zygote").as_deref(),
+        Some("stopped")
+    ) && utils::getprop("init.svc.zygote_secondary").is_none_or(|state| state == "stopped")
 }
 
 fn stop_android_services_for_mount() -> Result<()> {
     let status = Command::new("stop")
         .status()
         .context("failed to execute Android stop command")?;
-    ensure!(status.success(), "Android stop exited with status {status}");
+    if !status.success() {
+        if let Err(start_err) = start_android_services() {
+            return Err(start_err).context(format!(
+                "Android stop exited with status {status}; recovery start also failed"
+            ));
+        }
+        bail!("Android stop exited with status {status}; Android service state restored");
+    }
 
     for _ in 0..ZYGOTE_STOP_RETRIES {
         if zygote_services_stopped() {
@@ -59,7 +67,14 @@ fn stop_android_services_for_mount() -> Result<()> {
         thread::sleep(ZYGOTE_STOP_RETRY_DELAY);
     }
 
-    bail!("zygote services did not stop before metamodule mount synchronization")
+    if let Err(start_err) = start_android_services() {
+        return Err(start_err).context(
+            "zygote services did not stop before metamodule mount synchronization; recovery start failed",
+        );
+    }
+    bail!(
+        "zygote services did not stop before metamodule mount synchronization; Android service state restored"
+    )
 }
 
 fn start_android_services() -> Result<()> {
