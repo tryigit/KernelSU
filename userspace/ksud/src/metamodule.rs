@@ -317,7 +317,7 @@ fn register_module_mounts() -> Result<()> {
                 return Ok(());
             }
         }
-        Err(err) if matches!(err.raw_os_error(), Some(libc::EINVAL) | Some(libc::ENOTTY)) => {
+        Err(err) if matches!(err.raw_os_error(), Some(libc::EINVAL | libc::ENOTTY)) => {
             if initial_mounts.is_empty() {
                 return Ok(());
             }
